@@ -447,7 +447,7 @@
         9
       ]
     ],
-    "note": "no IR cut on the sensor: all channels respond 30-40 % past 800 nm; channels drawn together from ~850 nm"
+    "note": "sensor alone (ZWO's chart): no IR cut on the sensor, all channels respond 30-40 % past 800 nm. In the camera, the protective window is an IR-cut filter (John, 27 Oct 2026), so the system response past ~700 nm is cut: the green channel (TG) is effectively ~490-590 nm."
   },
   "points": {
     "dark_current_e_per_px_s": {
@@ -456,5 +456,6 @@
     },
     "qe_peak": 0.8,
     "hcg_switch_gain": 100
-  }
+  },
+  "window": "IR-cut protective window about 10 mm above the sensor (John, 27 Oct 2026)"
 }
