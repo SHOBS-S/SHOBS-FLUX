@@ -1,0 +1,153 @@
+{
+  "format": "shobs-camera-profile",
+  "format_version": 1,
+  "profile_id": "zwo-asi2600mc-air__g100__o50__bin1",
+  "revision": 1,
+  "written_by": "SHOBS-FLUX (example, hand-built 2026-10-27)",
+  "created": "2026-10-27T10:00:00-04:00",
+  "updated": "2026-10-27T10:00:00-04:00",
+  "spec_file": "zwo-asi2600mc.json",
+  "camera": {
+    "instrume": "ZWO ASI2600MC Air",
+    "sensor": "Sony IMX571",
+    "type": "CMOS",
+    "color": "OSC",
+    "bayer_pattern": "RGGB",
+    "pixel_um": 3.76,
+    "width_px": 6248,
+    "height_px": 4176,
+    "adc_bits": 16,
+    "file_bits": 16,
+    "adu_step": 1
+  },
+  "mode": {
+    "gain_setting": 100,
+    "offset": 50,
+    "readout_mode": "HCG",
+    "binning": 1,
+    "set_temp_c": -10
+  },
+  "values": {
+    "gain_e_per_adu": {
+      "value": 0.2429,
+      "unit": "e-/ADU",
+      "sigma": null,
+      "source": "header",
+      "n": null,
+      "date": "2026-10-21",
+      "conditions": "EGAIN keyword, gain 100",
+      "run": null
+    },
+    "read_noise_e": {
+      "value": 1.3,
+      "unit": "e-",
+      "sigma": null,
+      "source": "spec",
+      "n": null,
+      "date": null,
+      "conditions": null,
+      "run": null,
+      "note": "read off ZWO gain chart at gain 100"
+    },
+    "full_well_e": {
+      "value": 15900,
+      "unit": "e-",
+      "sigma": null,
+      "source": "spec",
+      "n": null,
+      "date": null,
+      "conditions": null,
+      "run": null,
+      "note": "ADC-limited at gain 100: 65,535 ADU x 0.2429"
+    },
+    "saturation_adu": {
+      "value": 65535,
+      "unit": "ADU",
+      "sigma": null,
+      "source": "spec",
+      "n": null,
+      "date": null,
+      "conditions": null,
+      "run": null
+    },
+    "linear_limit_adu": {
+      "value": 32000,
+      "unit": "ADU",
+      "sigma": null,
+      "source": "user",
+      "n": null,
+      "date": null,
+      "conditions": null,
+      "run": null,
+      "note": "typed by user; linearity only measured to 0.49 of full scale"
+    },
+    "bias_level_adu": {
+      "value": null,
+      "unit": "ADU",
+      "sigma": null,
+      "source": "none",
+      "n": null,
+      "date": null,
+      "conditions": null,
+      "run": null,
+      "note": "not yet measured; FLUX fills from bias frames"
+    },
+    "dark_current_e_per_px_s": {
+      "value": 0.007,
+      "unit": "e-/px/s",
+      "sigma": null,
+      "source": "estimate",
+      "n": null,
+      "date": null,
+      "conditions": "-10 C",
+      "run": null,
+      "note": "scaled from spec 0.0022 at -20 C, doubling every ~6 C"
+    },
+    "exposure_offset_s": {
+      "value": 0.29,
+      "unit": "s",
+      "sigma": null,
+      "source": "estimate",
+      "n": null,
+      "date": null,
+      "conditions": null,
+      "run": null,
+      "note": "seen 13 Oct for 1.2-2 s exposures; unconfirmed, possible timing-mode switch near 1 s"
+    },
+    "qe_peak": {
+      "value": 0.8,
+      "unit": "fraction",
+      "sigma": null,
+      "source": "spec",
+      "n": null,
+      "date": null,
+      "conditions": null,
+      "run": null
+    }
+  },
+  "per_channel": {
+    "R": {
+      "gain_e_per_adu": null,
+      "read_noise_e": null,
+      "linear_limit_adu": null
+    },
+    "G": {
+      "gain_e_per_adu": null,
+      "read_noise_e": null,
+      "linear_limit_adu": null
+    },
+    "B": {
+      "gain_e_per_adu": null,
+      "read_noise_e": null,
+      "linear_limit_adu": null
+    },
+    "_note": "filled by the bench PTC run; null = use the camera-wide value above"
+  },
+  "linearity": {
+    "curve_adu": [],
+    "max_deviation_pct": null,
+    "measured_to_fraction_of_full_scale": 0.49,
+    "source": "measured",
+    "date": "2026-10-13"
+  }
+}

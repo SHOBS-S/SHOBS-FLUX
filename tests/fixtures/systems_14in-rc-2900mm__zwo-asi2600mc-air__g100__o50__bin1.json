@@ -1,0 +1,155 @@
+{
+  "format": "shobs-system-profile",
+  "format_version": 1,
+  "profile_id": "14in-rc-2900mm__zwo-asi2600mc-air__g100__o50__bin1",
+  "revision": 1,
+  "written_by": "SHOBS-FLUX (example, hand-built 2026-10-27)",
+  "created": "2026-10-27T10:00:00-04:00",
+  "updated": "2026-10-27T10:00:00-04:00",
+  "camera_profile": "zwo-asi2600mc-air__g100__o50__bin1",
+  "telescope": {
+    "name": "14in RC",
+    "aperture_mm": 356,
+    "focal_mm": 2900,
+    "focal_header": 2905,
+    "telescop_header": "EQMod Mount",
+    "telescop_header_ignored": "mount name, not a telescope",
+    "central_obstruction_fraction": null,
+    "mount": "EQ8-R"
+  },
+  "site": "uses each app's own site setting (never stored here)",
+  "plate_scale": {
+    "raw_arcsec_per_px": {
+      "value": 0.267,
+      "unit": "arcsec/px",
+      "sigma": null,
+      "source": "derived",
+      "n": null,
+      "date": null,
+      "conditions": null,
+      "run": null,
+      "note": "206.265 x 3.76 um / 2900 mm"
+    },
+    "debayered_bin2_arcsec_per_px": {
+      "value": 1.09,
+      "unit": "arcsec/px",
+      "sigma": null,
+      "source": "derived",
+      "n": null,
+      "date": null,
+      "conditions": null,
+      "run": null
+    }
+  },
+  "bands": {
+    "TG": {
+      "zero_point": {
+        "value": 21.0,
+        "unit": "mag for 1 e-/s",
+        "sigma": null,
+        "source": "estimate",
+        "n": null,
+        "date": null,
+        "conditions": null,
+        "run": null,
+        "note": "cold start: QE 0.8 x system efficiency 0.4"
+      },
+      "extinction_k": {
+        "value": null,
+        "unit": "mag/airmass",
+        "sigma": null,
+        "source": "none",
+        "n": null,
+        "date": null,
+        "conditions": null,
+        "run": null
+      },
+      "sky_brightness": {
+        "value": null,
+        "unit": "mag/arcsec2",
+        "sigma": null,
+        "source": "none",
+        "n": null,
+        "date": null,
+        "conditions": null,
+        "run": null
+      },
+      "fwhm_in_focus": {
+        "value": 3.0,
+        "unit": "arcsec",
+        "sigma": null,
+        "source": "estimate",
+        "n": null,
+        "date": null,
+        "conditions": null,
+        "run": null,
+        "note": "cold-start default"
+      },
+      "fwhm_defocus": {
+        "+125 steps": {
+          "value": null,
+          "unit": "arcsec",
+          "sigma": null,
+          "source": "none",
+          "n": null,
+          "date": null,
+          "conditions": null,
+          "run": null,
+          "note": "donut; defocus factor 1.5x used until measured"
+        }
+      },
+      "scintillation_cy": {
+        "value": 1.5,
+        "unit": "Young C_Y",
+        "sigma": null,
+        "source": "estimate",
+        "n": null,
+        "date": null,
+        "conditions": null,
+        "run": null,
+        "note": "SHOBS-P default; slightly low on HD 219134"
+      }
+    },
+    "TR": {
+      "zero_point": {
+        "value": null,
+        "unit": "mag for 1 e-/s",
+        "sigma": null,
+        "source": "none",
+        "n": null,
+        "date": null,
+        "conditions": null,
+        "run": null
+      }
+    },
+    "TB": {
+      "zero_point": {
+        "value": null,
+        "unit": "mag for 1 e-/s",
+        "sigma": null,
+        "source": "none",
+        "n": null,
+        "date": null,
+        "conditions": null,
+        "run": null
+      }
+    }
+  },
+  "cadence": {
+    "overhead_s": {
+      "value": 3,
+      "unit": "s",
+      "sigma": null,
+      "source": "measured",
+      "n": 265,
+      "date": "2026-10-22",
+      "conditions": null,
+      "run": null,
+      "note": "NGC 7789: 265 x 60 s in ~280 min; capture software and download only"
+    }
+  },
+  "learning": {
+    "outlier_rejection": "sigma-clip 3.0 per night",
+    "min_nights_for_measured": 1
+  }
+}
