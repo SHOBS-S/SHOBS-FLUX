@@ -130,6 +130,13 @@ def camera_in_use(setup: dict, file_max_adu: float = 65535.0, temp_c=None) -> Ca
 
     # dark current
     rec = from_profile("dark_current_e_per_px_s")
+    curve = (spec or {}).get("dark_current_curve") or {}
+    t_now = sp._finite(temp_c)
+    if rec is None and t_now is not None and isinstance(curve.get("points"), list) and len(curve["points"]) >= 2:
+        v = dark_from_curve(curve["points"], t_now)
+        if v is not None:
+            rec = sp.record(round(v, 6), "e-/px/s", "spec", conditions=f"{t_now:g} °C",
+                            note=f"{spec.get('model')} dark-current curve at the frame's temperature")
     if rec is None and spec and isinstance((spec.get("points") or {}).get("dark_current_e_per_px_s"), dict):
         d = spec["points"]["dark_current_e_per_px_s"]
         dv, dt = sp._finite(d.get("value")), sp._finite(d.get("at_temp_c"))
@@ -149,6 +156,26 @@ def camera_in_use(setup: dict, file_max_adu: float = 65535.0, temp_c=None) -> Ca
         rec = sp.record(float(spec["points"]["qe_peak"]), "fraction", "spec")
     _set(cam, "qe_peak", rec if rec is not None else sp.record(None, "fraction", "none"))
     return cam
+
+
+def dark_from_curve(points, temp_c: float):
+    """A dark-current curve [[°C, e-/px/s], ...] read at temp_c: straight lines in log(dark current), so the
+    doubling every few degrees is followed; beyond the ends the end segment's doubling rate is carried on."""
+    import math
+    pts = sorted((float(t), float(v)) for t, v in points if sp._finite(t) is not None and sp._finite(v)
+                 and float(v) > 0)
+    if len(pts) < 2:
+        return None
+    if temp_c <= pts[0][0]:
+        (t0, v0), (t1, v1) = pts[0], pts[1]
+    elif temp_c >= pts[-1][0]:
+        (t0, v0), (t1, v1) = pts[-2], pts[-1]
+    else:
+        i = next(k for k in range(len(pts) - 1) if pts[k][0] <= temp_c <= pts[k + 1][0])
+        (t0, v0), (t1, v1) = pts[i], pts[i + 1]
+    if t1 == t0:
+        return v0
+    return math.exp(math.log(v0) + (math.log(v1) - math.log(v0)) * (temp_c - t0) / (t1 - t0))
 
 
 def starting_camera_profile(cam: CameraInUse, frame_header: dict, written_by: str) -> dict:

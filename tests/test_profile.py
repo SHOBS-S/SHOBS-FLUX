@@ -169,3 +169,22 @@ class TestFinding(TempData):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestBuiltinSpec(TempData):
+    """The ASI2600MC spec read from ZWO's three charts (27 Oct 2026)."""
+
+    def test_builtin_spec(self):
+        import instrument
+        spec = sp.find_spec("ZWO ASI2600MC Air", (instrument.BUILTIN_SPECS,))
+        self.assertEqual(sp.validate(spec), [])
+        self.assertAlmostEqual(sp.spec_at(spec, "read_noise_e", 100), 1.31, msg="HCG value from gain 100 up")
+        self.assertAlmostEqual(sp.spec_at(spec, "read_noise_e", 99), 3.03, places=1)
+        self.assertAlmostEqual(sp.spec_at(spec, "gain_e_per_adu", 100), 0.24)
+        self.assertAlmostEqual(instrument.dark_from_curve(spec["dark_current_curve"]["points"], -10), 0.00054)
+        self.assertAlmostEqual(instrument.dark_from_curve(spec["dark_current_curve"]["points"], -12.5),
+                               (0.00054 * 0.00023) ** 0.5, places=6)
+        cam = instrument.camera_in_use(sp.setup_key({"INSTRUME": "ZWO ASI2600MC Air", "GAIN": 100, "OFFSET": 50,
+                                                     "XBINNING": 1}), temp_c=-10.0)
+        self.assertAlmostEqual(cam.value("dark_current_e_per_px_s"), 0.00054)
+        self.assertEqual(cam.source("dark_current_e_per_px_s"), "spec")
