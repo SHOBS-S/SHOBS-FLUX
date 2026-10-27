@@ -250,6 +250,7 @@ class CheckPage:
             set_msg(self.msg_var, self.msg, "")
         self.path_var.set(os.path.basename(path))
         self.open_btn.configure(state="disabled")
+        self.recheck_btn.configure(state="disabled")
         fill = dict(self.app.prefs.get("header_answers") or {})
 
         def work(step):
@@ -259,6 +260,8 @@ class CheckPage:
 
     def checked(self, res, exc):
         self.open_btn.configure(state="normal")
+        if self.res is not None or res is not None:
+            self.recheck_btn.configure(state="normal")
         if exc is not None:
             import frames
             why = str(exc) if isinstance(exc, frames.FrameError) else f"{type(exc).__name__}: {exc}"

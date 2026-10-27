@@ -57,6 +57,8 @@ def camera_in_use(setup: dict, file_max_adu: float = 65535.0, temp_c=None) -> Ca
     """The camera values for a frame with this setup key (shobs_profile.setup_key). file_max_adu = the largest value
     the file can hold (65535 for 16-bit files, less for a scaled 12/14-bit camera); temp_c = the sensor temperature
     of the frame (CCD-TEMP) for the dark-current estimate."""
+    if not (isinstance(file_max_adu, (int, float)) and file_max_adu == file_max_adu and 0 < file_max_adu < 1e12):
+        file_max_adu = 65535.0
     cam = CameraInUse(cam_id=setup.get("camera_id") or "unknown", setup=dict(setup))
     prof = sp.find_camera_profile(cam.cam_id)
     if prof:

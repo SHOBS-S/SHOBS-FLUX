@@ -55,6 +55,22 @@ CREATE TABLE IF NOT EXISTS onsky_files (
 """
 
 
+def _clean(v):
+    """NaN / infinity → None, numpy scalars → plain numbers, so the stored JSON is strict."""
+    if isinstance(v, dict):
+        return {str(k): _clean(x) for k, x in v.items()}
+    if isinstance(v, (list, tuple)):
+        return [_clean(x) for x in v]
+    if hasattr(v, "item") and callable(v.item) and not isinstance(v, (str, bytes)):
+        try:
+            v = v.item()
+        except (TypeError, ValueError):
+            return None
+    if isinstance(v, float) and v != v or v in (float("inf"), float("-inf")):
+        return None
+    return v
+
+
 def db_path() -> str:
     return sp.runs_db_path()
 
@@ -89,18 +105,19 @@ def record_run(kind: str, source: str, summary: dict, camera_id: str | None = No
                 "INSERT INTO runs (run_key, kind, started, finished, app, camera_id, system_id, source, n_frames, "
                 "status, summary) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (key, kind, now, now, app, camera_id, system_id, source, n_frames, status,
-                 json.dumps(summary, ensure_ascii=False, default=str)))
+                 json.dumps(_clean(summary), ensure_ascii=False, default=str, allow_nan=False)))
             rid = cur.lastrowid
             for v in values or []:
                 con.execute("INSERT INTO run_values (run_id, profile_id, key, channel, value, sigma, unit, source, "
                             "date) VALUES (?,?,?,?,?,?,?,?,?)",
-                            (rid, v.get("profile_id"), v["key"], v.get("channel"), v.get("value"), v.get("sigma"),
+                            (rid, v.get("profile_id"), v["key"], v.get("channel"), _clean(v.get("value")),
+                             _clean(v.get("sigma")),
                              v.get("unit"), v.get("source"), v.get("date") or now[:10]))
             con.commit()
         finally:
             con.close()
         return key
-    except (sqlite3.Error, OSError, KeyError):
+    except (sqlite3.Error, OSError, KeyError, ValueError, TypeError):
         return None
 
 

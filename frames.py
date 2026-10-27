@@ -80,11 +80,27 @@ def exptime_of(header: dict):
     return v if v is not None and v >= 0 else None
 
 
+def shift_pattern(pattern: str, xoff, yoff) -> str:
+    """The Bayer pattern seen from a frame whose first pixel sits xoff, yoff pixels into the sensor's pattern
+    (XBAYROFF / YBAYROFF on cropped or ROI frames): an odd x offset swaps the columns, an odd y offset the rows."""
+    rows = [pattern[0:2], pattern[2:4]]
+    try:
+        xo, yo = int(round(float(xoff or 0))) % 2, int(round(float(yoff or 0))) % 2
+    except (TypeError, ValueError):
+        return pattern
+    if xo:
+        rows = [r[::-1] for r in rows]
+    if yo:
+        rows = rows[::-1]
+    return rows[0] + rows[1]
+
+
 def bayer_of(header: dict):
+    """The Bayer pattern of the frame as stored (BAYERPAT or COLORTYP, moved by XBAYROFF / YBAYROFF), or None."""
     for key in ("BAYERPAT", "COLORTYP"):
         v = header.get(key)
         if isinstance(v, str) and v.strip().upper() in BAYER_PATTERNS:
-            return v.strip().upper()
+            return shift_pattern(v.strip().upper(), header.get("XBAYROFF"), header.get("YBAYROFF"))
     return None
 
 
@@ -141,6 +157,20 @@ _XISF_TYPES = {"UInt8": np.uint8, "UInt16": np.uint16, "UInt32": np.uint32, "Flo
 
 
 def _xisf(path: str, header_only: bool = False):
+    """read_xisf with every parse problem as a FrameError in plain words."""
+    import xml.etree.ElementTree as ET
+    import zlib
+    try:
+        return _xisf_raw(path, header_only)
+    except FrameError:
+        raise
+    except (ET.ParseError, ValueError, IndexError, zlib.error) as exc:
+        raise FrameError(f"its XISF header or data cannot be read ({exc})") from None
+    except OSError as exc:
+        raise FrameError(f"it could not be opened ({exc.strerror or exc})") from None
+
+
+def _xisf_raw(path: str, header_only: bool = False):
     import xml.etree.ElementTree as ET
     import zlib
 
@@ -262,7 +292,13 @@ def read_frame(path: str) -> Frame:
         if data.ndim == 3:
             if data.shape[0] in (3, 4):
                 notes.append("a color image already debayered by other software: its first channel is used")
-            data = data[0]
+                data = data[0]
+            elif data.shape[-1] in (3, 4):
+                notes.append("a color image already debayered by other software: its first channel is used")
+                data = data[..., 0]
+            else:
+                notes.append(f"a stack of {data.shape[0]} images: only the first is checked")
+                data = data[0]
         if data.ndim != 2:
             raise FrameError(f"it is not a 2-D image (shape {data.shape})")
     step = adu_step(data)

@@ -248,6 +248,14 @@ def raw_peak(frame_data: np.ndarray, pattern, x: float, y: float, r: float, k: i
     return float(vals.flat[i]), ch
 
 
+def time_to_linear(peak: float, bias: float, lin: float, t_exp) -> float:
+    """The exposure at which a pixel now at peak ADU reaches the linear limit: star AND sky both grow with time,
+    so everything above the bias scales (the sky is not a constant floor)."""
+    if not t_exp or not math.isfinite(peak) or peak <= bias or lin <= bias:
+        return float("nan")
+    return t_exp * (lin - bias) / (peak - bias)
+
+
 def plate_scale(setup: dict, k: int):
     """Arcseconds per measurement pixel from the header (XPIXSZ, XBINNING, FOCALLEN), or None."""
     pix, f, b = setup.get("pixel_um"), setup.get("focal_mm"), setup.get("binning") or 1
@@ -298,10 +306,30 @@ def check_image(path: str, step=None, fill: dict | None = None) -> CheckResult:
             frame.notes.append("from your earlier answer: " + ", ".join(f"{k} = {v}" for k, v in added.items()))
     data = frame.data
     hdr = {str(k).upper(): v for k, v in frame.header.items()}
-    file_max = 65535.0 - (frame.adu_step - 1) if frame.data.max() <= 65535 else float(np.nanmax(data))
+    finite = np.isfinite(data)
+    if not finite.any():
+        raise fr.FrameError("the frame holds no numbers (every pixel is blank or NaN)")
+    mx = float(np.max(data[finite])) if not finite.all() else float(data.max())
+    file_max = 65535.0 - (frame.adu_step - 1) if mx <= 65535 else mx
     temp = fr.hfloat(hdr, "CCD-TEMP", "CCD_TEMP", "SENSOR-TEMP", "TEMPERAT")
     cam = instrument.camera_in_use(frame.setup, file_max_adu=file_max, temp_c=temp)
     res = CheckResult(path=path, frame=frame, cam=cam)
+    # a camera that saturates below the file's top (many CCDs): pixels pile up just under the frame's maximum
+    if cam.source("saturation_adu") == "estimate" and frame.kind in ("light", "unknown", "flat") \
+            and 0.6 * file_max <= mx < file_max - 2 * frame.adu_step:
+        n_top = int(np.count_nonzero(data >= 0.97 * mx))
+        if n_top >= 50:
+            plateau = round(0.97 * mx)
+            cam.records["saturation_adu"] = sp.record(
+                float(plateau), "ADU", "estimate",
+                note=f"inferred: {n_top} pixels pile up near {mx:.0f} ADU, under the file's top ({file_max:.0f})")
+            if cam.source("linear_limit_adu") == "estimate":
+                cam.records["linear_limit_adu"] = sp.record(
+                    round(instrument.LINEAR_FRACTION * plateau), "ADU", "estimate",
+                    note=f"{instrument.LINEAR_FRACTION:.0%} of the inferred saturation")
+            cam.notes.append(f"⚠ This camera seems to saturate near {plateau:.0f} ADU, below the file's top "
+                             f"({file_max:.0f}): saturation is inferred from this frame until a bench run "
+                             "measures it.")
     gain = cam.value("gain_e_per_adu", instrument.DEFAULT_GAIN)
     rn = cam.value("read_noise_e", instrument.DEFAULT_READ_NOISE)
     sat = cam.value("saturation_adu", file_max)
@@ -344,7 +372,7 @@ def check_image(path: str, step=None, fill: dict | None = None) -> CheckResult:
 
     # ---- pixels at or over the limits
     say("Counting saturated pixels")
-    res.sat_pixels = int(np.count_nonzero(data >= sat - frame.adu_step))
+    res.sat_pixels = int(np.count_nonzero(data >= sat))
     res.over_linear_pixels = int(np.count_nonzero(data >= lin))
 
     # ---- sky and noise per color, in the middle of the frame
@@ -392,7 +420,8 @@ def check_image(path: str, step=None, fill: dict | None = None) -> CheckResult:
     for ch, c in res.channels.items():
         rate = f", {c['sky_rate']:.2f} e⁻/px/s" if math.isfinite(c["sky_rate"]) else ""
         sky_parts.append(f"{names[ch]} {c['sky_adu']:.0f} ADU = {fmt_e(c['sky_e'])} e⁻/px{rate}")
-    how = {"measured": "measured", "derived": "worked out from the sky noise"}.get(res.bias[1], "from the profile")
+    how = {"measured": "measured", "derived": "worked out from the sky noise, approximate: bias frames will "
+           "measure it"}.get(res.bias[1], "from the profile")
     res.add("info", f"Sky in the middle of the frame (bias {bias:.0f} ADU, {how}): " + "; ".join(sky_parts))
     worst_sky = max(c["sky_adu"] for c in res.channels.values())
     head = lin - bias
@@ -456,12 +485,8 @@ def check_image(path: str, step=None, fill: dict | None = None) -> CheckResult:
         if not st.donut:
             st.fwhm_px = gaussian_fwhm(img, st.x, st.y, m["sky"], half=int(max(6, min(20, 2.5 * st.r95))))
         st.raw_peak, st.peak_channel = raw_peak(data, pattern, st.x, st.y, st.r95, k)
-        sky_raw = m["sky"] / k
-        if math.isfinite(st.raw_peak) and t_exp:
-            star_part = st.raw_peak - sky_raw
-            if star_part > 0:
-                st.t_linear = t_exp * (lin - sky_raw * 1.0) / star_part if lin > sky_raw else float("nan")
-        if st.raw_peak >= sat - frame.adu_step:
+        st.t_linear = time_to_linear(st.raw_peak, bias, lin, t_exp)
+        if st.raw_peak >= sat:
             st.status = "bad"
         elif st.raw_peak >= lin:
             st.status = "warn"
@@ -631,9 +656,7 @@ def measure_at(res: CheckResult, x: float, y: float) -> StarResult | None:
     if not st.donut:
         st.fwhm_px = gaussian_fwhm(img, st.x, st.y, m["sky"], half=int(max(6, min(20, 2.5 * st.r95))))
     st.raw_peak, st.peak_channel = raw_peak(frame.data, frame.bayer, st.x, st.y, st.r95, k)
-    sky_raw = m["sky"] / k
-    if math.isfinite(st.raw_peak) and t_exp and st.raw_peak > sky_raw and lin > sky_raw:
-        st.t_linear = t_exp * (lin - sky_raw) / (st.raw_peak - sky_raw)
-    st.status = "bad" if st.raw_peak >= sat - frame.adu_step else ("warn" if st.raw_peak >= lin else "ok")
+    st.t_linear = time_to_linear(st.raw_peak, bias, lin, t_exp)
+    st.status = "bad" if st.raw_peak >= sat else ("warn" if st.raw_peak >= lin else "ok")
     res.stars.append(st)
     return st

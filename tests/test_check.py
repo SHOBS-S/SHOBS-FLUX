@@ -131,3 +131,55 @@ class TestCheck(TempData):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestReviewFixes(TempData):
+    """Fable review, 27 Oct 2026."""
+
+    def test_nan_pixels_do_not_set_saturation(self):
+        data, hdr = synth.make_star_frame(shape=SHAPE, stars=synth.star_list(SHAPE, 8, 1.0e5))
+        from astropy.io import fits
+        d = data.copy()
+        d[10, 10] = float("nan")
+        p = self.path("nan.fits")
+        h = fits.Header()
+        for k, v in hdr.items():
+            if k != "SIMPLE":
+                h[k] = v
+        fits.PrimaryHDU(d.astype("float32"), header=h).writeto(p)
+        res = ic.check_image(p)
+        self.assertEqual(res.cam.value("saturation_adu"), 65535.0)
+        self.assertFalse(kinds(res, "bad"), res.lines)
+        fits.PrimaryHDU((d * float("nan")).astype("float32"), header=h).writeto(p, overwrite=True)
+        import frames
+        with self.assertRaises(frames.FrameError):
+            ic.check_image(p)
+
+    def test_time_to_linear_scales_sky_too(self):
+        # everything above the bias grows with time: 60 s × (32500 − 500) / (16500 − 500) = 120 s
+        self.assertAlmostEqual(ic.time_to_linear(16500.0, 500.0, 32500.0, 60.0), 120.0)
+        self.assertTrue(math.isnan(ic.time_to_linear(400.0, 500.0, 32500.0, 60.0)))
+
+    def test_bayer_offset(self):
+        import frames
+        self.assertEqual(frames.shift_pattern("RGGB", 1, 0), "GRBG")
+        self.assertEqual(frames.shift_pattern("RGGB", 0, 1), "GBRG")
+        self.assertEqual(frames.shift_pattern("RGGB", 1, 1), "BGGR")
+        self.assertEqual(frames.bayer_of({"BAYERPAT": "RGGB", "XBAYROFF": 1, "YBAYROFF": 1}), "BGGR")
+
+    def test_bad_xisf_is_plain(self):
+        import frames
+        p = self.path("bad.xisf")
+        with open(p, "wb") as fh:
+            fh.write(b"XISF0100" + (20).to_bytes(4, "little") + b"\0\0\0\0" + b"<xisf><Image geom")
+        with self.assertRaises(frames.FrameError):
+            frames.read_frame(p)
+
+    def test_record_numpy_and_nan(self):
+        import numpy as np
+        r = sp.record(np.float32(0.25), "e-/ADU", "measured", sigma=float("nan"), n=np.int64(40))
+        self.assertIsInstance(r["value"], float)
+        self.assertIsNone(r["sigma"])
+        import json
+        json.dumps(r, allow_nan=False)
+        self.assertTrue(sp.validate({"format": sp.SPEC_FORMAT, "format_version": True, "curves": {}}))
