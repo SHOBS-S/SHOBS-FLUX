@@ -818,7 +818,7 @@ class App(tk.Tk):
         self.check_page = CheckPage(self, holder)
         self.profiles_page = ProfilesPage(self, holder)
         self.pages = [self.check_page,
-                      ComingPage(self, holder, "Camera", CAMERA_TEXT),
+                      self._camera_page(holder),
                       ComingPage(self, holder, "Sky", SKY_TEXT, extra=onsky_status),
                       self.profiles_page,
                       ComingPage(self, holder, "History", HISTORY_TEXT)]
@@ -827,6 +827,11 @@ class App(tk.Tk):
         self.credits_page = CreditsPage(self, holder)
         self.credits_page.frame.place(relx=0, rely=0, relwidth=1, relheight=1)
         self.page_index = None
+
+    def _camera_page(self, holder):
+        import camera_page
+        self.camera_page = camera_page.CameraPage(self, holder)
+        return self.camera_page
 
     def _place_window(self):
         try:

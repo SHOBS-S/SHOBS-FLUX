@@ -92,15 +92,23 @@ def _setup_word(h: dict) -> tuple:
     return (fr.hfloat(h, "GAIN"), fr.hfloat(h, "OFFSET", "BLKLEVEL"), fr.hfloat(h, "XBINNING", "BINNING") or 1.0)
 
 
-def scan_folder(folder: str, step=None) -> Scan:
-    """Read the headers of every frame in the folder (not subfolders) and pair them. Problems that stop a bench run
-    (no flat pairs, frames from different gains or sizes) go in scan.problems; everything else is a note."""
+def scan_folder(folder: str, step=None, bias_folder: str | None = None) -> Scan:
+    """Read the headers of every frame in the folder (not subfolders) and pair them. bias_folder: bias frames shot
+    separately (they replace any bias frames in folder). Problems that stop a bench run (no flat pairs, frames from
+    different gains or sizes) go in scan.problems; everything else is a note."""
     sc = Scan(folder=folder)
     paths = fr.list_frames(folder)
     if not paths:
         sc.problems.append("there are no FITS or XISF frames in this folder")
         return sc
+    bias_paths = []
+    if bias_folder and os.path.normcase(os.path.abspath(bias_folder)) != os.path.normcase(os.path.abspath(folder)):
+        bias_paths = fr.list_frames(bias_folder)
+        if not bias_paths:
+            sc.notes.append(("warn", "⚠ The bias folder holds no FITS or XISF frames; bias frames in the flats "
+                                     "folder are used, if any."))
     infos = []
+    paths = paths + bias_paths
     for i, p in enumerate(paths):
         if step and i % 10 == 0:
             step(f"Reading headers… {i} of {len(paths)}")
@@ -114,7 +122,17 @@ def scan_folder(folder: str, step=None) -> Scan:
         kind = fr.kind_of(h, p)
         t = fr.exptime_of(h)
         when = str(h.get("DATE-OBS") or h.get("DATE") or "")
+        if p in bias_paths and kind in ("dark", "unknown", "light") and (t is None or t <= 0.01):
+            kind = "bias"                      # in the bias folder, a very short frame is a bias whatever it says
         infos.append(FrameInfo(p, kind, t, h, shape, fr.bayer_of(h), when or os.path.basename(p)))
+    if bias_paths:
+        separate = [f for f in infos if f.path in set(bias_paths) and f.kind == "bias"]
+        if separate:
+            dropped = [f for f in infos if f.kind == "bias" and f.path not in set(bias_paths)]
+            infos = [f for f in infos if f not in dropped]
+            if dropped:
+                sc.notes.append(("info", f"The {len(dropped)} bias frames in the flats folder are left out: the "
+                                         f"{len(separate)} in the bias folder are used instead."))
     sc.frames = infos
     if not infos:
         sc.problems.append("none of the frames in this folder could be read")
@@ -152,9 +170,12 @@ def scan_folder(folder: str, step=None) -> Scan:
     sc.setup = sp.setup_key(used[0].header)
     temps = [fr.hfloat(f.header, "CCD-TEMP", "CCD_TEMP", "SENSOR-TEMP") for f in used]
     temps = [t for t in temps if t is not None]
-    if temps and max(temps) - min(temps) > 2.0:
+    if temps and max(temps) - min(temps) > 5.0:
         sc.notes.append(("warn", f"⚠ The sensor temperature changed by {max(temps) - min(temps):.1f} °C during the "
-                                 "frames: dark current and bias can move with it."))
+                                 "frames: the bias level and dark current move with it. Let the cooler settle first."))
+    elif temps and max(temps) - min(temps) > 1.0:
+        sc.notes.append(("info", f"The sensor temperature varied by {max(temps) - min(temps):.1f} °C across the "
+                                 "frames (small; noted)."))
 
     # pairs: frames of one kind and exposure, in shooting order, taken two at a time
     groups: dict = {}
@@ -290,6 +311,7 @@ class ChannelResult:
     full_well_how: str = ""            # "well" (the pixels fill first) / "ADC top" / ""
     plateau_adu: float = float("nan")  # the mean level the saturated pairs stop at
     lin_intercept: float = float("nan")  # c in M = c + rate·t (ADU): bias + rate × timing offset
+    linear_is_bound: bool = False      # the limit is only "at least": no pair was seen bending
     saturation_adu: float = float("nan")
     rate: float = float("nan")         # ADU/s above bias
     t_offset: float = float("nan")     # s
@@ -320,6 +342,7 @@ class BenchResult:
     full_well_e: float = float("nan")
     saturation_adu: float = float("nan")
     linear_limit_adu: float = float("nan")
+    linear_is_bound: bool = False
     bias_adu: float = float("nan")
     t_offset: float = float("nan")
     t_offset_sigma: float = float("nan")
@@ -385,9 +408,11 @@ def _saturation_level(arrs: list, file_top: float, step: int) -> float:
     return best if best is not None else file_top
 
 
-def run_bench(folder: str, region_name: str = DEFAULT_REGION, step=None, scan: Scan | None = None) -> BenchResult:
-    """The whole bench run on a folder. BenchError (plain words) when it cannot be done."""
-    sc = scan or scan_folder(folder, step)
+def run_bench(folder: str, region_name: str = DEFAULT_REGION, step=None, scan: Scan | None = None,
+              bias_folder: str | None = None) -> BenchResult:
+    """The whole bench run on a folder (and, optionally, bias frames from a folder of their own). BenchError (plain
+    words) when it cannot be done."""
+    sc = scan or scan_folder(folder, step, bias_folder)
     if sc.problems:
         raise BenchError(sc.problems[0])
     frac = REGIONS.get(region_name, REGIONS[DEFAULT_REGION])
@@ -497,8 +522,18 @@ def run_bench(folder: str, region_name: str = DEFAULT_REGION, step=None, scan: S
 
     # per channel PTC
     for c in chans:
+        _channel(res.channels[c], raw, c, q, sat_level, res.adu_step)
+    # a bias worked out from the flats: one level for all colors (one ADC), each color's own estimate is noisier
+    derived = [res.channels[c].bias_adu for c in chans if res.channels[c].bias_source == "derived"]
+    if len(chans) > 1 and len(derived) == len(chans):
+        common = float(np.median(derived))
+        for c in chans:
+            ch = res.channels[c]
+            ch.bias_adu = common
+            _channel(ch, raw, c, q, sat_level, res.adu_step, derive=False)
+            ch.bias_source = "derived"
+    for c in chans:
         ch = res.channels[c]
-        _channel(ch, raw, c, q, sat_level, res.adu_step)
         if not math.isnan(ch.gain) and not math.isnan(ch.read_noise_adu):
             ch.read_noise_e = ch.read_noise_adu * ch.gain
 
@@ -517,8 +552,15 @@ def run_bench(folder: str, region_name: str = DEFAULT_REGION, step=None, scan: S
         ch.bias_source == "measured" for ch in good) else float("nan")
     fw = [ch.full_well_e for ch in good if math.isfinite(ch.full_well_e)]
     res.full_well_e = float(min(fw)) if fw else float("nan")
-    ll = [ch.linear_limit_adu for ch in good if math.isfinite(ch.linear_limit_adu)]
-    res.linear_limit_adu = float(min(ll)) if ll else float("nan")
+    # one ADC reads every color: a level any color stayed linear at holds for all, unless a color bent sooner
+    bends = [ch.linear_limit_adu for ch in good if math.isfinite(ch.linear_limit_adu) and not ch.linear_is_bound]
+    bounds = [ch.linear_limit_adu for ch in good if math.isfinite(ch.linear_limit_adu) and ch.linear_is_bound]
+    if bends:
+        res.linear_limit_adu = float(min(bends))
+        res.linear_is_bound = False
+    elif bounds:
+        res.linear_limit_adu = float(max(bounds))
+        res.linear_is_bound = True
     off = [(ch.t_offset, ch.t_offset_sigma) for ch in good if math.isfinite(ch.t_offset)]
     if off:
         wo = np.array([1.0 / max(s, 1e-6) ** 2 for _, s in off])
@@ -601,8 +643,10 @@ def light_in_bias(bias_blocks: np.ndarray, flat_blocks: np.ndarray) -> tuple[flo
     return r, slope
 
 
-def _channel(ch: ChannelResult, raw: list, c: str, q: float, sat_level: float, step: int) -> None:
-    """Fill one color's PTC, linearity and timing from the flat pairs (raw: [(Pair, {ch: Moments})])."""
+def _channel(ch: ChannelResult, raw: list, c: str, q: float, sat_level: float, step: int,
+             derive: bool = True) -> None:
+    """Fill one color's PTC, linearity and timing from the flat pairs (raw: [(Pair, {ch: Moments})]). derive=False:
+    keep ch.bias_adu as given (a common level for all colors)."""
     stats = []
     for p, mom in raw:
         m = mom[c]
@@ -631,7 +675,7 @@ def _channel(ch: ChannelResult, raw: list, c: str, q: float, sat_level: float, s
     bias = ch.bias_adu if math.isfinite(ch.bias_adu) else 0.0     # provisional 0: the PTC slope does not care
     pts = measure(bias)
     fit(pts, sat_level - bias)
-    if ch.bias_source != "measured" and math.isfinite(ch.gain) and math.isfinite(ch.ptc_intercept):
+    if derive and ch.bias_source != "measured" and math.isfinite(ch.gain) and math.isfinite(ch.ptc_intercept):
         # V = (M − bias)/g + RN²  →  intercept on raw means = −bias/g + RN²; RN² is small next to bias/g
         rn2 = ch.read_noise_adu ** 2 if math.isfinite(ch.read_noise_adu) else 0.0
         b_est = (rn2 - ch.ptc_intercept) * ch.gain
@@ -766,10 +810,12 @@ def _fit_linearity(ch: ChannelResult, pts: list, sat_level: float) -> None:
             lim = last_ok.mean_raw + f * (first_bad.mean_raw - last_ok.mean_raw)
             how = f"where the curve leaves ±{LIN_TOL_PCT:g} %"
     elif first_bad is not None and first_bad.saturated:
-        how = (f"linear to the brightest unsaturated pair; the next pair saturated, so the true limit lies between "
-               f"{last_ok.mean_raw:,.0f} and {sat_level:,.0f} ADU")
+        how = (f"straight up to the brightest unsaturated pair ({last_ok.mean_raw:,.0f} ADU); the next pair "
+               "saturated, so the limit is at least that")
+        ch.linear_is_bound = True
     else:
-        how = "linear to the brightest pair shot; the true limit may be higher"
+        how = "straight up to the brightest pair shot; the limit may be higher"
+        ch.linear_is_bound = True
     ch.linear_limit_adu = float(lim)
     ch.linear_limit_how = how
     below = [abs(p.deviation_pct) for p in ladder if p.mean_raw <= lim and math.isfinite(p.deviation_pct)]
@@ -838,11 +884,18 @@ def _findings(res: BenchResult, sc: Scan) -> None:
         res.add("info", "Full well: not reached (no pair went to saturation). Add a few longer exposures past the "
                         "top to measure it.")
     if math.isfinite(res.linear_limit_adu):
-        worst = min(chans, key=lambda c: res.channels[c].linear_limit_adu
-                    if math.isfinite(res.channels[c].linear_limit_adu) else float("inf"))
-        res.add("ok", f"✔ Linear limit {res.linear_limit_adu:,.0f} ADU (±{LIN_TOL_PCT:g} %; " + ", ".join(
-            f"{c} {res.channels[c].linear_limit_adu:,.0f}" for c in chans
-            if math.isfinite(res.channels[c].linear_limit_adu)) + f"). {worst}: {res.channels[worst].linear_limit_how}.")
+        per = ", ".join(f"{c} {res.channels[c].linear_limit_adu:,.0f}" + ("+" if res.channels[c].linear_is_bound else "")
+                        for c in chans if math.isfinite(res.channels[c].linear_limit_adu))
+        if res.linear_is_bound:
+            res.add("ok", f"✔ Linear limit at least {res.linear_limit_adu:,.0f} ADU: every color stayed within "
+                          f"±{LIN_TOL_PCT:g} % of a straight line right up to its last unsaturated pair ({per}). One "
+                          "ADC reads all colors, so the highest of those holds for the camera. A few pairs between "
+                          f"{res.linear_limit_adu:,.0f} and {res.saturation_adu:,.0f} ADU would find where it bends.")
+        else:
+            worst = min((c for c in chans if math.isfinite(res.channels[c].linear_limit_adu)
+                         and not res.channels[c].linear_is_bound), key=lambda c: res.channels[c].linear_limit_adu)
+            res.add("ok", f"✔ Linear limit {res.linear_limit_adu:,.0f} ADU (±{LIN_TOL_PCT:g} %; {per}). "
+                          f"{worst}: {res.channels[worst].linear_limit_how}.")
     else:
         res.add("warn", "⚠ The linear limit could not be found: too few unsaturated pairs at different exposures.")
     if math.isfinite(res.t_offset):
@@ -886,7 +939,8 @@ def summary_of(res: BenchResult) -> dict:
     out = {"kind": "bench", "region": res.region_name, "adu_step": res.adu_step, "bayer": res.bayer,
            "gain_e_per_adu": f(res.gain), "gain_sigma": f(res.gain_sigma, 5), "read_noise_e": f(res.read_noise_e, 3),
            "full_well_e": f(res.full_well_e, 0), "saturation_adu": f(res.saturation_adu, 0),
-           "linear_limit_adu": f(res.linear_limit_adu, 0), "bias_adu": f(res.bias_adu, 1),
+           "linear_limit_adu": f(res.linear_limit_adu, 0), "linear_limit_at_least": res.linear_is_bound,
+           "bias_adu": f(res.bias_adu, 1),
            "exposure_offset_s": f(res.t_offset, 5), "drift_pct": f(res.drift_pct, 3), "lit_bias": res.lit_bias,
            "n_flat_pairs": res.n_flat_pairs, "n_bias_pairs": res.n_bias_pairs, "temp_c": res.temp_c,
            "worst": res.worst, "channels": {}}
@@ -947,7 +1001,8 @@ def measured_records(res: BenchResult, run_key: str | None = None) -> tuple[dict
              else "ADC top: (saturation − bias) × gain"),
             ("saturation_adu", res.saturation_adu, "ADU", None, None, 0, "level the brightest flats pile up at"),
             ("linear_limit_adu", res.linear_limit_adu, "ADU", None, None, 0,
-             f"highest raw level within ±{LIN_TOL_PCT:g} % of the straight line (lowest color)"),
+             (f"at least: straight (±{LIN_TOL_PCT:g} %) to the brightest unsaturated pair" if res.linear_is_bound
+              else f"highest raw level within ±{LIN_TOL_PCT:g} % of the straight line (lowest color)")),
             ("bias_level_adu", res.bias_adu, "ADU", None, res.n_bias_pairs, 1, "bias pairs"),
             ("exposure_offset_s", res.t_offset, "s", res.t_offset_sigma, None, 4, "linearity fit")):
         r = _rec(v, unit, sig, n, d, cond, run_key, note, nd)
@@ -1036,8 +1091,10 @@ def apply_to_profile(res: BenchResult, doc: dict | None, written_by: str, run_ke
 
 # ---- the shooting plan --------------------------------------------------------------------------------------------
 
-NICE = (0.001, 0.002, 0.005, 0.01, 0.02, 0.03, 0.05, 0.075, 0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6, 0.75, 1.0, 1.25,
-        1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0, 7.5, 10.0, 12.0, 15.0, 20.0, 25.0, 30.0, 40.0, 50.0, 60.0, 90.0, 120.0)
+NICE = (0.001, 0.002, 0.005, 0.01, 0.015, 0.02, 0.03, 0.04, 0.05, 0.06, 0.075, 0.09, 0.1, 0.125, 0.15, 0.175, 0.2, 0.25,
+        0.3, 0.35, 0.4, 0.45, 0.5, 0.6, 0.7, 0.75, 0.8, 0.9, 1.0, 1.1, 1.2, 1.25, 1.4, 1.5, 1.75, 2.0, 2.25, 2.5, 2.75,
+        3.0, 3.5, 4.0, 4.5, 5.0, 6.0, 7.0, 7.5, 8.0, 9.0, 10.0, 12.0, 15.0, 20.0, 25.0, 30.0, 40.0, 50.0, 60.0, 90.0,
+        120.0)
 
 
 def _nice(t: float) -> float:
@@ -1091,7 +1148,8 @@ def plan_text(plan: dict, gain_setting=None, offset=None, temp=None, bias_pairs:
               "",
               "ASIAIR: use the flat frame type with the exposure typed by hand (not auto-flat), or a Plan with one "
               "line per exposure. Don't touch the panel or the scope during the ladder.",
-              "Put every frame in one folder, then Camera page → Folder… → Run."]
+              "Put every frame in one folder (the bias frames may go in a folder of their own), then Camera page → "
+              "Flats folder… (and Bias folder…) → Run."]
     lines += [""] + plan["notes"] if plan["notes"] else []
     return "\n".join(lines)
 
