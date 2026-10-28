@@ -297,6 +297,43 @@ class TestCatalogs(TempData):
         self.assertAlmostEqual(catalogs.parse_angle("20 28 30.0", hours=True), 307.125)
         self.assertAlmostEqual(catalogs.parse_angle("-41:15:00"), -41.25)
 
+class TestReviewCases(FolderCase):
+    def test_stale_header_solution_with_dither(self):
+        # every header carries the first frame's solution while the field moves: stars are followed, not trusted
+        truth, res, ds, night = self.run_case(osc=True, wcs=True, stale_wcs=True, n_frames=16, dither_px=8.0)
+        self.assertTrue(night.photometric, night.lines)
+        self.assertAlmostEqual(night.zp1, truth["zp_e"], delta=0.03)
+
+    def test_cadence_from_all_lights(self):
+        truth = synth_lights.make_folder(self.path("lights"), n_frames=24, cadence_s=70.0, exptime=60.0)
+        res = sky_folder.run_folder(self.path("lights"), catalog=truth["fetch"], cam_lookup=NO_PROFILE, max_frames=12)
+        self.assertEqual(res.n_frames, 12)
+        self.assertAlmostEqual(res.doc["cadence"]["interval_s"], 70.0, delta=0.5)
+        night = onsky.analyse(onsky.load_dataset(res.doc, cam_lookup=NO_PROFILE))
+        self.assertAlmostEqual(night.overhead_s, 10.0, delta=0.5)
+
+    def test_page_calls_run_folder_with_real_arguments(self):
+        import inspect
+        params = inspect.signature(sky_folder.run_folder).parameters
+        for kw in ("channel", "step", "elevation_m", "site"):
+            self.assertIn(kw, params)
+
+    def test_web_page_answer_never_cached(self):
+        calls = []
+
+        def portal(url, timeout):
+            calls.append(url)
+            return b"<html><body>Sign in to the hotel wifi</body></html>"
+        with self.assertRaises(catalogs.CatalogError):
+            catalogs.vizier(catalogs.GAIA, 1.0, 2.0, 0.1, catalogs.GAIA_COLS, fetcher=portal)
+        with self.assertRaises(catalogs.CatalogError):
+            catalogs.vizier(catalogs.GAIA, 1.0, 2.0, 0.1, catalogs.GAIA_COLS, fetcher=portal)
+        self.assertEqual(len(calls), 4)                                   # asked again each time (2 hosts)
+
+    def test_sexagesimal_site(self):
+        self.assertAlmostEqual(sky_folder._angle_key({"SITELAT": "35 18 10"}, "SITELAT"), 35.30278, places=4)
+        self.assertAlmostEqual(sky_folder._angle_key({"SITELONG": "-81:56:24"}, "SITELONG"), -81.94, places=4)
+
 
 if __name__ == "__main__":
     unittest.main()

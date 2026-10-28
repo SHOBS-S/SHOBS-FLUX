@@ -481,6 +481,20 @@ def photometry(im: Image, x: float, y: float, r: float, rin: float, rout: float)
             "found": bool(flux > 3.0 * err and flux > 0)}
 
 
+def _angle_key(h: dict, *keys):
+    """A latitude or longitude in degrees from a header: a number, or text such as '35 21 36' / '+35:21:36'."""
+    v = fr.hfloat(h, *keys)
+    if v is not None:
+        return v
+    for k in keys:
+        t = h.get(k)
+        if isinstance(t, str) and t.strip():
+            a = catalogs.parse_angle(t.strip())
+            if a is not None:
+                return a
+    return None
+
+
 def _measure_all(im: Image, names, xy, r, rin, rout) -> dict:
     m = {}
     for name, (x, y) in zip(names, xy):
@@ -782,7 +796,12 @@ def run_folder(folder: str, channel: str = "G", step=None, catalog=None, cam_loo
     def cat_xy(wcs, ra, dec):
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            raw = wcs.all_world2pix(np.column_stack([ra, dec]), 0)
+            pts = np.column_stack([ra, dec]) if len(ra) else np.zeros((0, 2))
+            try:
+                raw = wcs.all_world2pix(pts, 0, quiet=True)
+            except Exception:                         # a distortion solution that will not invert far outside
+                raw = wcs.wcs_world2pix(pts, 0)       # the frame: the linear part is enough there
+        raw = np.where(np.isfinite(raw), raw, np.nan)
         return im0.from_raw(raw)
 
     # choose the stars
@@ -979,8 +998,8 @@ def run_folder(folder: str, channel: str = "G", step=None, catalog=None, cam_loo
                            "fwhm_px": _rnd(np.median(fw), 3) if fw else None, "sky": _rnd(sky, 3), "flag": "",
                            "aperture_px": r_k,
                            "precalibrated": bool(cal), "stars": stars_k,
-                           "_site": (fr.hfloat(f.header, "SITELAT", "LAT-OBS", "OBSLAT"),
-                                     fr.hfloat(f.header, "SITELONG", "LONG-OBS", "OBSLONG"),
+                           "_site": (_angle_key(f.header, "SITELAT", "LAT-OBS", "OBSLAT"),
+                                     _angle_key(f.header, "SITELONG", "LONG-OBS", "OBSLONG"),
                                      fr.hfloat(f.header, "SITEELEV", "ALT-OBS", "OBSALT"))})
     say("Writing the log")
     if not out_frames:
@@ -1010,8 +1029,9 @@ def run_folder(folder: str, channel: str = "G", step=None, catalog=None, cam_loo
             except Exception as exc:
                 L.append(("warn", f"⚠ The airmass could not be worked out ({exc})."))
         else:
-            L.append(("warn", "⚠ The frames have no AIRMASS and no site position (SITELAT/SITELONG): type the site "
-                              "on the Sky page so the airmass, and so the extinction, can be worked out."))
+            L.append(("warn", "⚠ The frames have no AIRMASS and no site position (SITELAT/SITELONG): type the site's "
+                              "latitude and longitude on the Sky page so the airmass, and so the extinction, can be "
+                              "worked out."))
     for fm in out_frames:
         fm.pop("_site", None)
 
@@ -1034,7 +1054,7 @@ def run_folder(folder: str, channel: str = "G", step=None, catalog=None, cam_loo
     run_id = f"flux-{datetime.now().strftime('%Y%m%dT%H%M%S')}-{secrets.token_hex(2)}"
     setup = {"instrume": key0.get("instrume"), "gain_setting": key0.get("gain_setting"), "offset": key0.get("offset"),
              "camera_binning": binning, "camera_id": cam_id, "focal_header_mm": focal,
-             "telescop_header": key0.get("telescop_header"), "pixel_um": pixel_um,
+             "telescop_header": key0.get("telescop_header"), "pixel_um": key0.get("pixel_um"),
              "e_per_adu_header": key0.get("e_per_adu"), "bayer_pattern": bayer if osc else None}
     measurement = {"debayer_mode": None, "software_binning": 1, "raw_px_per_px": im0.f,
                    "aperture_radius_px": r_ap, "sky_inner_px": round(rin, 2), "sky_outer_px": round(rout, 2),

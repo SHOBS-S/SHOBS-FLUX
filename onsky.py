@@ -124,6 +124,7 @@ class Dataset:
     peak: np.ndarray                    # frames × stars, raw ADU
     segment: np.ndarray = None          # per frame: '' or 'flip' (SHOBS-P marks the frames after a meridian flip)
     cadence: dict | None = None         # a FLUX folder run's time between ALL its lights (it may measure every Nth)
+    catalog_service: str = ""           # where the catalog magnitudes came from (a FLUX folder run says)
     n_frames_in_log: int = 0
     precalibrated: bool = False
     notes: list = field(default_factory=list)
@@ -160,6 +161,7 @@ class NightResult:
     bin_rms: float = float("nan")                      # 10-minute binned residual rms
     bin_range: float = float("nan")                    # lowest to highest 10-minute bin
     photometric: bool = False
+    too_short: bool = False                            # under MIN_BINS time bins: the sky could not be judged
     fwhm_arcsec: float = float("nan")
     fwhm_sigma: float = float("nan")
     focus: float = float("nan")                        # median FOCUSPOS
@@ -265,7 +267,10 @@ def load_dataset(path_or_doc, cam_lookup=None, path: str = "") -> Dataset:
         per_unit_px = float(n_color * soft_bin * soft_bin)
     e_per_unit = nums["gain"] * per_unit_px if nums["gain"] else None
     pix_um, focal = _f(setup.get("pixel_um")), _f(setup.get("focal_header_mm") or setup.get("focal_mm"))
-    px_arcsec = 206.264806 * pix_um / focal * rpp if pix_um and focal else None
+    # pixel_um is the sensor's own pixel (shobs_profile.setup_key divides XPIXSZ by the binning); a "raw" pixel in
+    # raw_px_per_px is the camera's (binned) pixel
+    cam_bin = int(_f(setup.get("camera_binning")) or 1)
+    px_arcsec = 206.264806 * pix_um * cam_bin / focal * rpp if pix_um and focal else None
 
     stars = doc.get("stars") or []
     names, cats = [], []
@@ -309,7 +314,8 @@ def load_dataset(path_or_doc, cam_lookup=None, path: str = "") -> Dataset:
         cat=np.array(cats, dtype=float), jd=col("jd_mid"), airmass=col("airmass"), exptime=col("exptime_s"),
         focuspos=col("focuspos"), fwhm_px=col("fwhm_px"), sky=col("sky"), flux=flux, peak=peak,
         segment=np.array([str(f.get("segment") or "") for f in keep], dtype=object),
-        cadence=doc.get("cadence") if isinstance(doc.get("cadence"), dict) else None, n_frames_in_log=len(frames_in), precalibrated=pre)
+        cadence=doc.get("cadence") if isinstance(doc.get("cadence"), dict) else None,
+        catalog_service=str(doc.get("catalog_service") or ""), n_frames_in_log=len(frames_in), precalibrated=pre)
     if not ds.night and nf:
         ds.night = night_of(float(np.nanmin(ds.jd)))
     return ds
@@ -322,6 +328,18 @@ def night_of(jd: float) -> str:
     return t.strftime("%Y-%m-%d")
 
 
+def _utc(text: str) -> float:
+    """An ISO time (any offset, or Z) as seconds since 1970 UTC; 0 when it cannot be read."""
+    from datetime import datetime, timezone
+    try:
+        t = datetime.fromisoformat(str(text).replace("Z", "+00:00"))
+    except ValueError:
+        return 0.0
+    if t.tzinfo is None:
+        t = t.replace(tzinfo=timezone.utc)
+    return t.timestamp()
+
+
 def newest_per_night(datasets: list) -> tuple[list, list]:
     """(kept, replaced): only the newest log of each night + target + band + camera counts (a re-run of a night in
     SHOBS-P writes a second log; counting both would weigh that night twice)."""
@@ -329,7 +347,7 @@ def newest_per_night(datasets: list) -> tuple[list, list]:
     for ds in datasets:
         k = ds.key
         cur = best.get(k)
-        if cur is None or (ds.written, ds.run_id) > (cur.written, cur.run_id):
+        if cur is None or (_utc(ds.written), ds.run_id) > (_utc(cur.written), cur.run_id):
             best[k] = ds
     kept = [d for d in datasets if best.get(d.key) is d]
     return kept, [d for d in datasets if best.get(d.key) is not d]
@@ -509,9 +527,11 @@ def analyse(ds: Dataset, k_prior: tuple | None = None, aperture_mm: float | None
             zp[:, j] = np.nan
     good = [j for j in range(ns) if ds.names[j] not in out]
     # catalog disagreement and variability, against the ensemble of the others
-    for _ in range(3):
-        if len(good) < 2:
-            break
+    # each star's own expected noise (photon, sky, read; mag per frame), so a faint star's scatter is not taken
+    # for variability
+    expect = _expected_mag_noise(ds)
+    n_start = len(good)
+    while len(good) >= 2 and n_start - len(good) < n_start // 2:          # never more than half the stars
         ens = np.nanmedian(zp[:, good], axis=1)
         offs = np.array([np.nanmedian(zp[:, j] - ens) for j in good])
         scat = np.array([rsigma(zp[:, j] - ens) for j in good])
@@ -523,17 +543,22 @@ def analyse(ds: Dataset, k_prior: tuple | None = None, aperture_mm: float | None
             d = offs[i] - med_off
             lim = max(CAT_OFFSET_MAG, CAT_OFFSET_SIGMA * s_off if math.isfinite(s_off) else 0.0)
             if len(good) >= 3 and abs(d) > lim:
-                drop.append((j, f"its catalog magnitude disagrees with the other stars by {d:+.2f} mag (a wrong "
-                                f"catalog value, a blend or a variable)"))
+                drop.append((abs(d), j, f"its catalog magnitude disagrees with the other stars by {d:+.2f} mag (a "
+                                        f"wrong catalog value, a blend or a variable)"))
             elif len(good) >= 4 and math.isfinite(scat[i]) and med_scat > 0 and scat[i] > VARY_FACTOR * med_scat \
                     and scat[i] > 0.01:
-                drop.append((j, f"it varies ({scat[i]:.3f} mag scatter against the others, {scat[i] / med_scat:.1f}× "
-                                "the typical star)"))
+                own = expect[j]
+                if math.isfinite(own) and scat[i] <= 2.0 * own:
+                    drop.append((scat[i], j, f"too faint to help ({scat[i]:.3f} mag scatter, about what its own "
+                                             f"photon and sky noise give)"))
+                else:
+                    drop.append((scat[i], j, f"it varies ({scat[i]:.3f} mag scatter against the others, "
+                                             f"{scat[i] / med_scat:.1f}× the typical star)"))
         if not drop:
             break
-        worst = max(drop, key=lambda t: abs(np.nanmedian(zp[:, t[0]] - ens)))   # one at a time, worst first
-        out[ds.names[worst[0]]] = worst[1]
-        good.remove(worst[0])
+        _, j, why = max(drop, key=lambda t: t[0])                         # one at a time, worst first
+        out[ds.names[j]] = why
+        good.remove(j)
     res.stars_used = [ds.names[j] for j in good]
     if len(good) < MIN_STARS:
         res.why_not = (f"only {len(good)} usable catalogued star{'s' if len(good) != 1 else ''} "
@@ -545,8 +570,13 @@ def analyse(ds: Dataset, k_prior: tuple | None = None, aperture_mm: float | None
     # each star's zero point shifted onto the ensemble (removes catalog offsets), then averaged per frame
     ens = np.nanmedian(zp[:, good], axis=1)
     offs = np.array([np.nanmedian(zp[:, j] - ens) for j in good])
-    shifted = zp[:, good] - (offs - np.nanmean(offs))[None, :]
-    zf = np.nanmean(shifted, axis=1)
+    shifted = zp[:, good] - (offs - np.nanmedian(offs))[None, :]    # median: one odd star cannot move the level
+    scat = np.array([rsigma(shifted[:, i] - ens) for i in range(len(good))])
+    w = 1.0 / np.maximum(np.where(np.isfinite(scat), scat, np.nanmax(scat) if np.isfinite(scat).any() else 1.0),
+                         0.003) ** 2                                       # a faint star weighs less than a bright one
+    wm = np.where(np.isfinite(shifted), w[None, :], 0.0)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        zf = np.nansum(np.where(np.isfinite(shifted), shifted, 0.0) * wm, axis=1) / wm.sum(axis=1)
     res.zp_frame = zf
     ok = np.isfinite(zf) & np.isfinite(ds.airmass)
     if ok.sum() < MIN_FRAMES:
@@ -571,11 +601,14 @@ def analyse(ds: Dataset, k_prior: tuple | None = None, aperture_mm: float | None
     k_fit, k_fit_s = -b, sb
     nbins = 0
     k_ok = False
-    if res.x_span >= K_MIN_SPAN and K_RANGE[0] <= k_fit <= K_RANGE[1] and k_fit_s < 0.1:
+    prior_measured = bool(k_prior and k_prior[0] is not None and math.isfinite(k_prior[0])
+                          and k_prior[1] == "profile")
+    k_disagrees = prior_measured and abs(k_fit - k_prior[0]) > 3 * k_fit_s + 0.1
+    if res.x_span >= K_MIN_SPAN and K_RANGE[0] <= k_fit <= K_RANGE[1] and k_fit_s < 0.1 and not k_disagrees:
         resid = zf - (a + b * (x - 1.0))
         bin_rms, nbins, bin_range = binned_rms(ds.jd[ok], resid[ok])     # every frame: clipping would hide haze
         k_ok = bool(math.isfinite(bin_rms) and bin_rms <= PHOT_BIN_RMS and bin_range <= PHOT_BIN_RANGE
-                    and nbins >= MIN_BINS and keep.mean() >= 0.8)
+                    and nbins >= MIN_BINS and keep[ok].mean() >= 0.8)
     if k_ok:
         res.rms, res.bin_rms, res.bin_range = rms, bin_rms, bin_range
         res.photometric = True
@@ -606,13 +639,20 @@ def analyse(ds: Dataset, k_prior: tuple | None = None, aperture_mm: float | None
     res.usable = True
 
     # findings
-    L.append(("ok" if res.photometric else "warn",
-              (f"✔ Photometric: the zero point held within {res.bin_range:.3f} mag across {nbins} time bins "
-               f"(rms {res.bin_rms:.3f})."
-               if res.photometric else
-               f"⚠ Not photometric: the zero point moved {res.bin_range:.3f} mag across the night in time bins "
-               f"(rms {res.bin_rms:.3f}; limits {PHOT_BIN_RANGE} and {PHOT_BIN_RMS}): clouds or haze. Kept out of "
-               "the zero point and extinction; seeing, sky, scintillation and cadence still count.")))
+    if nbins < MIN_BINS:
+        res.photometric = False
+        res.too_short = True
+        L.append(("info", f"Too short to judge the sky: {nbins} time bin{'s' if nbins != 1 else ''} of at least "
+                          f"10 minutes ({MIN_BINS} needed). Kept out of the zero point and extinction; seeing, sky, "
+                          "scintillation and cadence still count."))
+    else:
+        L.append(("ok" if res.photometric else "warn",
+                  (f"✔ Photometric: the zero point held within {res.bin_range:.3f} mag across {nbins} time bins "
+                   f"(rms {res.bin_rms:.3f})."
+                   if res.photometric else
+                   f"⚠ Not photometric: the zero point moved {res.bin_range:.3f} mag across the night in time bins "
+                   f"(rms {res.bin_rms:.3f}; limits {PHOT_BIN_RANGE} and {PHOT_BIN_RMS}): clouds or haze. Kept out of "
+                   "the zero point and extinction; seeing, sky, scintillation and cadence still count.")))
     if k_ok:
         L.append(("ok", f"✔ Extinction measured: k = {k_fit:.3f} ± {k_fit_s:.3f} mag/airmass over airmass "
                         f"{np.nanmin(x[keep]):.2f}–{np.nanmax(x[keep]):.2f}."))
@@ -621,7 +661,9 @@ def analyse(ds: Dataset, k_prior: tuple | None = None, aperture_mm: float | None
                           f"k = {res.k_used:.2f} used ({res.k_used_source})."))
     elif res.x_span >= K_MIN_SPAN:
         why = ("outside the physical range " f"{K_RANGE[0]:g}–{K_RANGE[1]:g}" if not K_RANGE[0] <= k_fit <= K_RANGE[1]
-               else "too uncertain" if k_fit_s >= 0.1 else "the sky changed during the night")
+               else "too uncertain" if k_fit_s >= 0.1
+               else f"far from your measured {k_prior[0]:.3f} (haze coming or going along the airmass track looks "
+                    "like extinction)" if k_disagrees else "the sky changed during the night")
         L.append(("warn", f"⚠ Extinction not measured: the fit over airmass {np.nanmin(x[ok]):.2f}–"
                           f"{np.nanmax(x[ok]):.2f} gave k = {k_fit:.3f} ± {k_fit_s:.3f}, but {why}; "
                           f"k = {res.k_used:.2f} used ({res.k_used_source})."))
@@ -666,6 +708,22 @@ def _remove_flip_step(z, x, segment, ok):
     frac = n_after / float(n_after + n_before)
     out = np.array(z, dtype=float) - step * after + step * frac
     return out, step
+
+
+def _expected_mag_noise(ds: Dataset) -> np.ndarray:
+    """Per catalogued star: the median magnitude noise per frame its own light, the sky and read noise give."""
+    n = len(ds.names)
+    if ds.e_per_unit is None or not n:
+        return np.full(n, np.nan)
+    e = ds.flux * ds.e_per_unit
+    sky_e = ds.sky * ds.e_per_unit
+    npix = math.pi * (ds.aperture_px or 8.0) ** 2
+    raw_per_px = ds.e_per_unit / ds.gain if ds.gain else 1.0
+    rn2 = (ds.read_noise_e or 0.0) ** 2 * raw_per_px
+    with np.errstate(divide="ignore", invalid="ignore"):
+        rel = np.sqrt(np.abs(e) + npix * (np.abs(sky_e)[:, None] + rn2)) / e
+    rel = np.where(e > 0, rel, np.nan)
+    return MAG * np.nanmedian(rel, axis=0) if np.isfinite(rel).any() else np.full(n, np.nan)
 
 
 def _seeing(res: NightResult) -> None:
@@ -737,7 +795,7 @@ def _sky(res: NightResult, zf) -> None:
 def _scintillation(res: NightResult, zp, good, aperture_m: float, elevation_m: float) -> None:
     """C_Y from each bright star's frame-to-frame scatter against the mean of the others."""
     ds = res.ds
-    if len(good) < 3 or ds.read_noise_e is None and ds.gain is None:
+    if len(good) < 3 or (ds.read_noise_e is None and ds.gain is None):
         return
     order = np.argsort(ds.jd)
     t = ds.exptime[order]
@@ -907,7 +965,8 @@ def combine(results: list, replaced: list | None = None, old_profile: dict | Non
         # zero point: photometric nights only, each night once, clipped across nights
         for r in rs:
             if math.isfinite(r.zp1) and not r.photometric:
-                bs.zp_out[f"{r.ds.night} {r.ds.target}"] = "not photometric (clouds or haze)"
+                bs.zp_out[f"{r.ds.night} {r.ds.target}"] = ("too short to judge the sky" if r.too_short else
+                                                            "not photometric (clouds or haze)")
         zn = _by_night([r for r in rs if r.photometric and math.isfinite(r.zp1)], lambda r: r.zp1,
                        lambda r: r.zp1_sigma)
         if zn:
@@ -915,6 +974,9 @@ def combine(results: list, replaced: list | None = None, old_profile: dict | Non
             for (n, v, _, _), k in zip(zn, keep):
                 if not k:
                     bs.zp_out[n] = f"disagrees with the other nights ({v:.2f})"
+            if len(zn) == 2 and abs(zn[0][1] - zn[1][1]) > 5 * math.hypot(zn[0][2], zn[1][2]):
+                bs.zp_out["(two nights)"] = (f"the only two photometric nights disagree by "
+                                             f"{abs(zn[0][1] - zn[1][1]):.2f} mag: both kept until a third decides")
             bs.zp1, bs.zp1_sigma = wmean([v for (_, v, _, _), k in zip(zn, keep) if k],
                                          [s for (_, _, s, _), k in zip(zn, keep) if k])
             bs.zp_nights = [n for (n, _, _, _), k in zip(zn, keep) if k]
@@ -998,6 +1060,15 @@ def _nights_word(nights: list) -> str:
     return f"{len(nights)} nights ({min(nights)} to {max(nights)})"
 
 
+def _catalog_words(s: Summary, band: str) -> str:
+    srcs = set()
+    for r in s.nights:
+        if r.ds.band == band and r.photometric:
+            srcs.add(r.ds.catalog_service.split(" (")[0] if r.ds.catalog_service else
+                     ("SHOBS-P's catalogs" if r.ds.source == "SHOBS-P" else "the folder run's catalog"))
+    return ", ".join(sorted(srcs)) or "the logs' catalogs"
+
+
 def measured_records(s: Summary, run_key: str | None = None) -> tuple[dict, dict]:
     """({band: {key: record or {defocus key: record}}}, {"overhead_s": record}) for what the nights measured."""
     bands = {}
@@ -1007,7 +1078,7 @@ def measured_records(s: Summary, run_key: str | None = None) -> tuple[dict, dict
             recs["zero_point"] = sp.record(
                 _rnd(b.zp1, 3), "mag for 1 e-/s", "measured", sigma=_rnd(b.zp1_sigma, 3), n=len(b.zp_nights),
                 date=max(b.zp_nights), conditions=_nights_word(b.zp_nights), run=run_key,
-                note="at airmass 1; photometric nights only, catalogued field stars (APASS DR9 / Gaia DR3)")
+                note="at airmass 1; photometric nights only; catalogued field stars from " + _catalog_words(s, band))
         if math.isfinite(b.k):
             recs["extinction_k"] = sp.record(_rnd(b.k, 3), "mag/airmass", "measured", sigma=_rnd(b.k_sigma, 3),
                                              n=len(b.k_nights), date=max(b.k_nights),

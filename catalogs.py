@@ -164,7 +164,7 @@ def parse_tsv(text: str) -> tuple[list[dict], str]:
     for ln in text.splitlines():
         if ln.startswith("#"):
             low = ln.lower()
-            if not low.startswith("#column") and any(w in low for w in ("error", "timeout", "truncated")):
+            if not low.startswith("#column") and any(w in low for w in ("error", "timeout", "truncated", "overflow")):
                 incomplete = incomplete or ln.lstrip("#").strip()
             continue
         if not ln.strip():
@@ -248,7 +248,17 @@ def vizier(source: str, ra: float, dec: float, radius_deg: float, cols, constrai
         if not rows and incomplete:
             problems.append(f"{host.split('//')[-1]}: {incomplete}")
             continue
-        if not incomplete and use_cache:
+        want = [str(cl).split("=")[0] for cl in cols]
+        if rows and not all(cl in rows[0] for cl in want[:2]):
+            # not VizieR's table (a proxy or sign-in page, an error page): never kept, never used
+            problems.append(f"{host.split('//')[-1]}: the answer was not a catalog table")
+            continue
+        if not rows and "<html" in text[:2000].lower():
+            problems.append(f"{host.split('//')[-1]}: the answer was a web page, not a catalog table")
+            continue
+        if rows and len(rows) >= out_max and not incomplete:
+            incomplete = f"the answer stopped at {out_max} stars (the field holds more)"
+        if not incomplete and rows and use_cache:      # an empty or cut-short answer is never kept
             _cache_write(key, rows, host.split("//")[-1])
         return rows, incomplete, host.split("//")[-1]
     raise CatalogError("the star catalog (VizieR) could not be reached: " + "; ".join(problems))

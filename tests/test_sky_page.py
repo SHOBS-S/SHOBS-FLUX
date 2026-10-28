@@ -277,7 +277,8 @@ class TestSkyPage(TempData):
         os.makedirs(folder)
         calls = {}
 
-        def run_folder(folder, channel="TG", step=None, elevation_m=None):
+        def run_folder(folder, channel="TG", step=None, catalog=None, cam_lookup=None, max_frames=150, site=None,
+                       elevation_m=None, variables=None):
             calls["run"] = (folder, channel, elevation_m)
             step("Measuring light 1 of 60")
             doc, _t = synth_sky.make_log(night="2026-10-22", seed=9, n_frames=60, written_by="SHOBS-FLUX 0.4.0",
@@ -324,7 +325,8 @@ class TestSkyPage(TempData):
         class SkyFolderError(Exception):
             pass
 
-        def run_folder(folder, channel="TG", step=None, elevation_m=None):
+        def run_folder(folder, channel="TG", step=None, catalog=None, cam_lookup=None, max_frames=150, site=None,
+                       elevation_m=None, variables=None):
             raise SkyFolderError("no light in this folder has a plate solution")
 
         fake = types.SimpleNamespace(run_folder=run_folder, save_log=None, scan=lambda f: {}, SkyFolderError=SkyFolderError)

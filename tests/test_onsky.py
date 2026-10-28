@@ -179,7 +179,7 @@ class TestNights(TempData):
                                      setup=ds[0].setup)
         self.assertEqual(sp.validate(doc), [])
         self.assertEqual(doc["bands"]["TG"]["zero_point"]["source"], "measured")
-        self.assertNotIn("site", [k for k in doc if doc.get(k) and k == "site" and "never" not in str(doc[k])])
+        self.assertIn("never stored", doc["site"])
         path = sp.save_profile(doc, "test")
         self.assertTrue(os.path.exists(path))
         back = sp.find_system_profile(cam, 2905)
@@ -208,6 +208,63 @@ class TestNights(TempData):
         ds, problems = onsky.read_logs(onsky.log_files(), lookup)
         self.assertEqual(len(problems), 1)
         self.assertEqual(len(ds), 5)
+
+class TestReviewCases(TempData):
+    def test_many_wrong_catalog_values(self):
+        ds, t = night(n_stars=20, cat_error={2: 0.6, 5: -0.7, 9: 0.8, 13: 0.5, 16: -0.9})
+        r = onsky.analyse(ds, None, 356, 300)
+        self.assertEqual(len(r.stars_out), 5, r.stars_out)
+        self.assertLess(abs(r.zp1 - t["zp1"]), 0.02)
+
+    def test_faint_star_is_not_called_variable(self):
+        ds, t = night(mags=list(np.linspace(9, 12, 10)) + [15.5, 15.8], exptime=10.0)
+        r = onsky.analyse(ds, None, 356, 300)
+        self.assertFalse(any("varies" in w for w in r.stars_out.values()), r.stars_out)
+
+    def test_short_run_is_not_blamed_on_the_sky(self):
+        ds, t = night(n_frames=15, exptime=60.0)                             # ~16 minutes
+        r = onsky.analyse(ds, None, 356, 300)
+        self.assertFalse(r.photometric)
+        self.assertTrue(r.too_short)
+        self.assertTrue(any("Too short to judge" in x for _, x in r.lines))
+        self.assertFalse(any("clouds or haze" in x for _, x in r.lines))
+
+    def test_newest_run_by_real_time(self):
+        a, _ = synth_sky.make_log(night="2026-11-02", run_id="a", written="2026-11-02T23:30:00-04:00")
+        b, _ = synth_sky.make_log(night="2026-11-02", run_id="b", written="2026-11-03T02:00:00Z")   # 03:30Z is later
+        kept, old = onsky.newest_per_night([onsky.load_dataset(a, lookup), onsky.load_dataset(b, lookup)])
+        self.assertEqual(kept[0].run_id, "a")
+
+    def test_k_far_from_the_profile_is_not_taken(self):
+        ds, t = night(haze_mag=0.15)                                         # haze along the airmass track
+        r = onsky.analyse(ds, (0.20, "profile"), 356, 300)
+        self.assertTrue(math.isnan(r.k))
+        self.assertTrue(any("far from your measured" in x for _, x in r.lines))
+
+    def test_flip_step_helper(self):
+        z = np.r_[np.full(10, 20.0), np.full(10, 19.9)]
+        x = np.full(20, 1.2)
+        seg = np.array([""] * 10 + ["flip"] * 10, dtype=object)
+        ok = np.ones(20, bool)
+        out, step = onsky._remove_flip_step(z, x, seg, ok)
+        self.assertAlmostEqual(step, -0.1, places=6)
+        self.assertLess(np.ptp(out), 1e-9)
+        ok[:7] = False                                                       # too few on one side
+        self.assertIsNone(onsky._remove_flip_step(z, x, seg, ok)[1])
+
+    def test_binned_rms(self):
+        jd = 2461000.5 + np.arange(30) * 60.0 / 86400.0                     # 30 minutes, one frame a minute
+        rms, n, rng = onsky.binned_rms(jd, np.zeros(30))
+        self.assertEqual(n, 3)
+        self.assertEqual(rng, 0.0)
+        jd = 2461000.5 + np.arange(12) * 1200.0 / 86400.0                   # sparse: widened bins
+        self.assertGreaterEqual(onsky.binned_rms(jd, np.zeros(12))[1], 3)
+
+    def test_camera_binning_in_the_scale(self):
+        doc, t = synth_sky.make_log()
+        doc["setup"]["camera_binning"] = 2
+        ds = onsky.load_dataset(doc, lookup)
+        self.assertAlmostEqual(ds.px_arcsec, 2 * t["px_arcsec"], places=6)
 
 
 class TestStats(unittest.TestCase):

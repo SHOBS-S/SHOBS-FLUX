@@ -49,9 +49,11 @@ def make_folder(folder: str, n_frames: int = 12, osc: bool = True, wcs: bool = T
                 n_stars: int = 70, mag_range=(10.0, 15.0), n_faint: int = 40, bright_mag: float | None = None,
                 crowded_pair: bool = False, read_noise: float = 1.5, bias: float = 500.0, dither_px: float = 6.0,
                 cadence_s: float = 150.0, airmass_header: bool = True, target: str = "Synthetic Field",
-                pointing_error_arcsec: float = 20.0, extra_files: bool = True) -> dict:
+                pointing_error_arcsec: float = 20.0, extra_files: bool = True, stale_wcs: bool = False) -> dict:
     """Write n_frames light frames (and, with extra_files, a flat and a dark that must be skipped) into folder.
-    size = (width, height) in camera pixels. Returns the truth (see the module text)."""
+    size = (width, height) in camera pixels. stale_wcs: every header carries the FIRST frame's plate solution while
+    the field dithers (as capture software that does not re-solve each frame). Returns the truth (see the module
+    text)."""
     os.makedirs(folder, exist_ok=True)
     rng = np.random.default_rng(seed)
     focal_mm = focal_mm or (2900.0 if osc else 4250.0)
@@ -159,7 +161,8 @@ def make_folder(folder: str, n_frames: int = 12, osc: bool = True, wcs: bool = T
             hdr["AIRMASS"] = round(x_air, 5)
         if wcs:
             hdr.update({"CTYPE1": "RA---TAN", "CTYPE2": "DEC--TAN", "CRVAL1": ra, "CRVAL2": dec,
-                        "CRPIX1": centre[0] + 1 + dx, "CRPIX2": centre[1] + 1 + dy, "CD1_1": cd[0, 0],
+                        "CRPIX1": centre[0] + 1 + (0.0 if stale_wcs else dx),
+                        "CRPIX2": centre[1] + 1 + (0.0 if stale_wcs else dy), "CD1_1": cd[0, 0],
                         "CD1_2": cd[0, 1], "CD2_1": cd[1, 0], "CD2_2": cd[1, 1], "EQUINOX": 2000.0,
                         "RADESYS": "ICRS"})
         name = f"Light_{target.replace(' ', '_')}_{exptime:g}.0s_Bin1_{f + 1:04d}.fit"

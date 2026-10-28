@@ -18,6 +18,8 @@ import tkinter as tk
 from collections import Counter
 from tkinter import filedialog, simpledialog, ttk
 
+import numpy as np
+
 import frames
 import history
 import onsky
@@ -41,7 +43,8 @@ def shobs_p_settings_path() -> str:
 
 
 def shobs_p_telescope() -> dict:
-    """{"name", "aperture_mm", "elevation_m"} from SHOBS-P's settings ({} when the file is missing or damaged)."""
+    """{"name", "aperture_mm", "elevation_m", "lat", "lon"} from SHOBS-P's settings ({} when the file is missing or
+    damaged)."""
     try:
         with open(shobs_p_settings_path(), encoding="utf-8") as fh:
             got = json.load(fh)
@@ -53,7 +56,7 @@ def shobs_p_telescope() -> dict:
     name = got.get("telescope_name")
     if isinstance(name, str) and name.strip():
         out["name"] = name.strip()
-    for key, mine in (("aperture_mm", "aperture_mm"), ("elevation", "elevation_m")):
+    for key, mine in (("aperture_mm", "aperture_mm"), ("elevation", "elevation_m"), ("lat", "lat"), ("lon", "lon")):
         v = sp._finite(got.get(key))
         if v is not None:
             out[mine] = v
@@ -102,19 +105,36 @@ def setup_key(info: dict) -> tuple:
 
 
 def setups_of(infos: list) -> list:
-    """[(key, label, newest night, paths)] for each distinct camera + focal length (10 mm) in the logs, the setup
-    with the newest night first."""
-    groups: dict = {}
+    """[(key, label, newest night, paths)] for each distinct camera + focal length in the logs, the setup with the
+    newest night first. Focal lengths within 3 % are one setup (ASIAIR's FOCALLEN moves a few mm with each plate
+    solve), labelled with their median."""
+    by_cam: dict = {}
     for i in infos:
         if i.get("why"):
             continue
-        groups.setdefault(setup_key(i), []).append(i)
+        by_cam.setdefault(i.get("camera_id"), []).append(i)
     out = []
-    for key, items in groups.items():
-        nights = {i["night"] for i in items}
-        label = f"{key[0]} · {key[1]} mm · {_plural(len(nights), 'night')}" if key[1] else \
-            f"{key[0]} · focal length not known · {_plural(len(nights), 'night')}"
-        out.append((key, label, max(nights), [i["path"] for i in items]))
+    for cam, items in by_cam.items():
+        known = sorted((i for i in items if i.get("focal")), key=lambda i: i["focal"])
+        clusters, cur = [], []
+        for i in known:
+            if cur and i["focal"] > cur[0]["focal"] * 1.03:
+                clusters.append(cur)
+                cur = []
+            cur.append(i)
+        if cur:
+            clusters.append(cur)
+        unknown = [i for i in items if not i.get("focal")]
+        if unknown:
+            clusters.append(unknown)
+        for cl in clusters:
+            fs = [i["focal"] for i in cl if i.get("focal")]
+            f = int(round(float(np.median(fs)) / 10.0) * 10) if fs else 0
+            key = (cam, f)
+            nights = {i["night"] for i in cl}
+            label = f"{cam} · {f} mm · {_plural(len(nights), 'night')}" if f else \
+                f"{cam} · focal length not known · {_plural(len(nights), 'night')}"
+            out.append((key, label, max(nights), [i["path"] for i in cl]))
     out.sort(key=lambda t: (t[2], t[1]), reverse=True)
     return out
 
@@ -160,6 +180,8 @@ class SkyPage:
         self.name_var = tk.StringVar(value=prefs.get("sky_telescope_name") or tel.get("name") or "")
         self.aperture_var = tk.StringVar(value=_num(prefs.get("sky_aperture_mm")) or _num(tel.get("aperture_mm")))
         self.elevation_var = tk.StringVar(value=_num(prefs.get("sky_elevation_m")) or _num(tel.get("elevation_m")))
+        self.lat_var = tk.StringVar(value=_num(prefs.get("sky_lat")) or _num(tel.get("lat")))
+        self.lon_var = tk.StringVar(value=_num(prefs.get("sky_lon")) or _num(tel.get("lon")))
         self.setup_var = tk.StringVar()
         self.logs_var = tk.StringVar()
         self.scan_var = tk.StringVar()
@@ -192,7 +214,8 @@ class SkyPage:
         self.folder_row = ttk.Frame(src, style="Card.TFrame")
         frow = ttk.Frame(self.folder_row, style="Card.TFrame")
         frow.pack(anchor="w", fill=tk.X)
-        ttk.Button(frow, text="Folder of lights…", command=self.pick_folder).pack(side=tk.LEFT)
+        self.folder_btn = ttk.Button(frow, text="Folder of lights…", command=self.pick_folder)
+        self.folder_btn.pack(side=tk.LEFT)
         ttk.Label(frow, textvariable=self.folder_var, style="Card.TLabel").pack(side=tk.LEFT, padx=(px(app, 8), 0))
         crow = ttk.Frame(self.folder_row, style="Card.TFrame")
         crow.pack(anchor="w", fill=tk.X, pady=(px(app, 4), 0))
@@ -208,16 +231,21 @@ class SkyPage:
                                            self.scan_label.configure(wraplength=max(200, e.width - px(app, 20)))),
                  add="+")
 
+        self._entries = []
         tg = ttk.LabelFrame(top, text="Telescope", style="Group.TLabelframe", padding=px(app, 8))
         tg.pack(side=tk.LEFT, fill=tk.Y, padx=(px(app, 10), 0))
         for i, (label, var, w) in enumerate((("Telescope name", self.name_var, 18),
                                              ("Aperture (mm)", self.aperture_var, 8),
-                                             ("Site elevation (m)", self.elevation_var, 8))):
+                                             ("Site elevation (m)", self.elevation_var, 8),
+                                             ("Site latitude (°)", self.lat_var, 8),
+                                             ("Site longitude (°, east +)", self.lon_var, 8))):
             ttk.Label(tg, text=label, style="Card.TLabel").grid(row=i, column=0, sticky="w", pady=(0, px(app, 2)))
-            ttk.Entry(tg, textvariable=var, width=w).grid(row=i, column=1, sticky="w", padx=(px(app, 6), 0),
-                                                         pady=(0, px(app, 2)))
-        ttk.Label(tg, text="aperture and elevation are for scintillation;\nthe site is never stored in a profile",
-                  style="Hint.TLabel", justify=tk.LEFT).grid(row=3, column=0, columnspan=2, sticky="w",
+            e = ttk.Entry(tg, textvariable=var, width=w)
+            e.grid(row=i, column=1, sticky="w", padx=(px(app, 6), 0), pady=(0, px(app, 2)))
+            self._entries.append(e)
+        ttk.Label(tg, text="aperture and elevation are for scintillation; latitude and longitude give the\n"
+                           "airmass when frames don't carry it. The site is never stored in a profile.",
+                  style="Hint.TLabel", justify=tk.LEFT).grid(row=5, column=0, columnspan=2, sticky="w",
                                                             pady=(px(app, 2), 0))
 
         run = ttk.Frame(self.frame, style="Card.TFrame")
@@ -434,8 +462,26 @@ class SkyPage:
             raise ValueError("the aperture must be more than 0 mm")
         return out[0], out[1]
 
+    def _site(self) -> dict | None:
+        """{"lat", "lon", "elevation"} from the entries, or None when latitude or longitude is blank or not a
+        number (a folder run then uses the frames' own SITELAT / SITELONG)."""
+        out = {}
+        for key, var, lo, hi in (("lat", self.lat_var, -90, 90), ("lon", self.lon_var, -180, 360)):
+            try:
+                v = float(var.get().strip().replace(",", ""))
+            except ValueError:
+                return None
+            if not (math.isfinite(v) and lo <= v <= hi):
+                return None
+            out[key] = v
+        out["elevation"] = sp._finite(self.elevation_var.get().strip().replace(",", ""))
+        return out
+
     def _save_prefs(self, aperture, elevation):
         p = self.app.prefs
+        site = self._site()
+        p["sky_lat"] = site["lat"] if site else None
+        p["sky_lon"] = site["lon"] if site else None
         p["sky_telescope_name"] = self.name_var.get().strip()
         p["sky_aperture_mm"] = aperture
         p["sky_elevation_m"] = elevation
@@ -458,10 +504,11 @@ class SkyPage:
                 self._say("⚠ Pick the folder of lights first (Folder of lights…).")
                 return
             channel = self.channel
+            site = self._site()
             self._busy()
 
             def work(step):
-                return self._folder_work(folder, channel, aperture, elevation, name, step)
+                return self._folder_work(folder, channel, aperture, elevation, name, step, site)
 
             self.app.jobs.run(work, self.done, f"On-sky run on {os.path.basename(folder)}")
             return
@@ -485,11 +532,11 @@ class SkyPage:
 
         self.app.jobs.run(work, self.done, "On-sky run")
 
-    def _folder_work(self, folder, channel, aperture, elevation, name, step) -> SkyRun:
+    def _folder_work(self, folder, channel, aperture, elevation, name, step, site=None) -> SkyRun:
         import sky_folder
         res = SkyRun()
         res.source, res.folder = "folder", folder
-        fr = sky_folder.run_folder(folder, channel=channel, step=step, elevation_m=elevation)
+        fr = sky_folder.run_folder(folder, channel=channel, step=step, elevation_m=elevation, site=site)
         res.folder_lines = list(getattr(fr, "lines", None) or [])
         doc = getattr(fr, "doc", None)
         if not doc:
@@ -534,11 +581,26 @@ class SkyPage:
         self.save_btn.configure(state="disabled")
         self.source.configure(state="disabled")
         self.setup.configure(state="disabled")
+        # what the run on its way reads (and Save later uses) stays as it is until the run is back
+        for w in [self.folder_btn, self.color] + self._entries:
+            try:
+                w.configure(state="disabled")
+            except tk.TclError:
+                pass
 
     def _idle(self):
         self.run_btn.configure(state="normal")
         self.source.configure(state="readonly")
         self.setup.configure(state="readonly")
+        for w in [self.folder_btn] + self._entries:
+            try:
+                w.configure(state="normal")
+            except tk.TclError:
+                pass
+        try:
+            self.color.configure(state="readonly")
+        except tk.TclError:
+            pass
 
     @staticmethod
     def _why(exc) -> str:
@@ -677,7 +739,13 @@ class SkyPage:
         if not changes:
             self._say("⚠ These nights measured nothing that goes in the system profile.")
             return
-        dlg = SaveDialog(self, pid, old, changes)
+        other = None
+        if old is None:                                   # another name already holds this camera at this focal?
+            try:
+                other = sp.find_system_profile(camera_of(res), focal_of(res.datasets))
+            except Exception:
+                other = None
+        dlg = SaveDialog(self, pid, old, changes, other=other)
         dlg.what = (res, self.run_key)                   # the run on screen now, whatever is showing at OK
 
     def do_save(self, pid: str, old: dict | None, keep_user: bool, what=None):
@@ -1037,7 +1105,7 @@ def scan_line(info) -> str:
 class SaveDialog(tk.Toplevel):
     """What saving changes, value by value; keep your own typed values or not; Save."""
 
-    def __init__(self, page: SkyPage, pid: str, old, changes):
+    def __init__(self, page: SkyPage, pid: str, old, changes, other=None):
         super().__init__(page.app)
         self.page, self.pid, self.old = page, pid, old
         app = page.app
@@ -1051,6 +1119,13 @@ class SaveDialog(tk.Toplevel):
                               "kept in the history folder); values these nights did not measure stay as they are."
                               if old else "There is no profile for this telescope and camera yet: a new one is made."),
                   style="Hint.TLabel", wraplength=px(app, 560), justify=tk.LEFT).pack(anchor="w", pady=(0, px(app, 6)))
+        if other and other.get("profile_id") != pid:
+            oname = (other.get("telescope") or {}).get("name") or "?"
+            ttk.Label(body, text=f"⚠ There is already a system profile for this camera at this focal length: "
+                                 f"{other.get('profile_id')} (telescope “{oname}”). Saving here makes a second one; "
+                                 f"Cancel and type “{oname}” as the telescope name to update that one instead.",
+                      style="Warn.TLabel", wraplength=px(app, 560), justify=tk.LEFT).pack(anchor="w",
+                                                                                         pady=(0, px(app, 6)))
         tr = ttk.Treeview(body, columns=("old", "new"), show="tree headings", height=min(len(changes), 14) or 1,
                           selectmode="none")
         tr.heading("#0", text="Value")
