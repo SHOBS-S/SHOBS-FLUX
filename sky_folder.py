@@ -721,7 +721,10 @@ def run_folder(folder: str, channel: str = "G", step=None, catalog=None, cam_loo
     stars_cat = list(field_doc.get("stars") or [])
     all_cat = list(field_doc.get("all") or stars_cat)
     if field_doc.get("incomplete"):
-        L.append(("warn", f"⚠ The catalog answer may be incomplete ({field_doc['incomplete']})."))
+        if "did not answer" in str(field_doc.get("service") or ""):
+            pass                                        # said in the "Stars placed …; catalog: …" line below
+        else:
+            L.append(("warn", f"⚠ The catalog answer may be incomplete ({field_doc['incomplete']})."))
     if len(stars_cat) < 3:
         raise SkyFolderError(f"The catalog has too few stars with {onsky.BAND_WORDS.get(cat_band, cat_band)} "
                              "magnitudes in this field.")
