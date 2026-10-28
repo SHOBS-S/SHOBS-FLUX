@@ -416,11 +416,73 @@ def fetch_field(ra_deg: float, dec_deg: float, radius_deg: float, cat_band: str,
     except CatalogError as exc:
         problems.append(f"Gaia: {exc}")
     if not services:
-        raise CatalogError("the star catalog (VizieR) could not be reached; check the internet connection and try "
-                           "again (" + "; ".join(problems) + ")")
+        local = shobs_p_cache_field(ra_deg, dec_deg, radius_deg, band)
+        if local is not None:
+            return local
+        raise CatalogError("the star catalog (VizieR) could not be reached, and SHOBS-P's catalog cache on this "
+                           "computer does not cover this field; check the internet connection and try again later "
+                           "(" + "; ".join(problems) + ")")
     out = merge_field(apass_stars(apass_rows), gaia_stars(gaia_rows), band)
     out["service"] = " + ".join(services)
     out["incomplete"] = "; ".join(inc + problems)
+    out["band"] = band
+    return out
+
+
+def shobs_p_cache_dir() -> str:
+    """SHOBS-P keeps the catalog answers it got (APASS, Gaia…) in ~/.shobs_p_cache/catalogs (read only here)."""
+    return os.path.join(os.path.expanduser("~"), ".shobs_p_cache", "catalogs")
+
+
+SHOBS_P_CACHE_MIN_STARS = 10
+
+
+def shobs_p_cache_field(ra_deg: float, dec_deg: float, radius_deg: float, cat_band: str,
+                        folder: str | None = None) -> dict | None:
+    """When VizieR does not answer: the field's stars from SHOBS-P's catalog cache (any field already reduced in
+    SHOBS-P is there), in fetch_field's shape, or None when the cache does not cover this field (fewer than
+    SHOBS_P_CACHE_MIN_STARS stars with a magnitude in the band). Never raises."""
+    d = folder or shobs_p_cache_dir()
+    try:
+        names = [n for n in os.listdir(d) if n.endswith(".json") and n.split("_")[0] in ("APASS", "Gaia")]
+    except OSError:
+        return None
+    band = str(cat_band or "V").upper()
+    u0 = _unit_vectors([ra_deg], [dec_deg])[0]
+    cos_r = math.cos(math.radians(radius_deg))
+    apass, gaia, seen = [], [], set()
+    for n in names:
+        try:
+            with open(os.path.join(d, n), encoding="utf-8") as fh:
+                doc = json.load(fh)
+            stars = doc.get("stars") or []
+            ra = np.array([_num(x.get("ra")) if isinstance(x, dict) else None for x in stars], dtype=float)
+            dec = np.array([_num(x.get("dec")) if isinstance(x, dict) else None for x in stars], dtype=float)
+        except (OSError, ValueError, TypeError, AttributeError):
+            continue
+        if not len(ra):
+            continue
+        ok = np.isfinite(ra) & np.isfinite(dec)
+        inside = np.zeros(len(ra), bool)
+        inside[ok] = _unit_vectors(ra[ok], dec[ok]) @ u0 >= cos_r
+        for i in np.where(inside)[0]:
+            x = stars[i]
+            name = str(x.get("auid") or "")
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            mags = {str(k).upper(): float(v) for k, v in (x.get("mags") or {}).items() if _num(v) is not None}
+            entry = {"ra": float(ra[i]), "dec": float(dec[i]), "mags": mags, "name": name}
+            if n.startswith("APASS"):
+                apass.append(entry)
+            else:
+                entry["G"] = _num(x.get("bright"))
+                gaia.append(entry)
+    out = merge_field(apass, gaia, band)
+    if len(out["stars"]) < SHOBS_P_CACHE_MIN_STARS:
+        return None
+    out["service"] = "SHOBS-P's catalog cache on this computer (VizieR did not answer)"
+    out["incomplete"] = "VizieR did not answer; the stars came from SHOBS-P's saved catalog answers for this field"
     out["band"] = band
     return out
 

@@ -4,6 +4,7 @@ and crowded stars, folders without lights, the catalog parser, band names, the G
 network: the catalog comes from the synthetic field."""
 from __future__ import annotations
 
+import json
 import os
 import unittest
 
@@ -265,8 +266,31 @@ class TestCatalogs(TempData):
         def down(url, timeout):
             raise OSError("network is unreachable")
 
-        with self.assertRaisesRegex(catalogs.CatalogError, "could not be reached"):
-            catalogs.fetch_field(10.0, 20.0, 0.1, "V", fetcher=down)
+        old_dir = catalogs.shobs_p_cache_dir
+        catalogs.shobs_p_cache_dir = lambda: self.path("no_cache_here")
+        try:
+            with self.assertRaisesRegex(catalogs.CatalogError, "could not be reached"):
+                catalogs.fetch_field(10.0, 20.0, 0.1, "V", fetcher=down)
+            # VizieR down, but SHOBS-P reduced this field once: its saved catalog answer is used instead
+            cache = self.path("p_cache")
+            os.makedirs(cache)
+            stars = [{"auid": f"APASS J{i:03d}", "ra": 10.0 + 0.004 * i, "dec": 20.0, "mags": {"V": 11.0 + 0.1 * i},
+                      "bright": 11.0 + 0.1 * i} for i in range(15)]
+            gaia = [{"auid": f"Gaia DR3 {i}", "ra": 10.0 + 0.004 * i, "dec": 20.0 + 0.5 / 3600,
+                     "mags": {"V": 11.02 + 0.1 * i}, "bright": 10.8 + 0.1 * i} for i in range(15)] + \
+                [{"auid": "Gaia DR3 far", "ra": 30.0, "dec": -5.0, "mags": {"V": 9.0}, "bright": 9.0}]
+            for name, st in (("APASS_abc.json", stars), ("Gaia_def.json", gaia), ("Tycho_x.json", stars)):
+                with open(os.path.join(cache, name), "w") as fh:
+                    json.dump({"key": {}, "created": 0, "stars": st}, fh)
+            catalogs.shobs_p_cache_dir = lambda: cache
+            got = catalogs.fetch_field(10.03, 20.0, 0.1, "V", fetcher=down)
+            self.assertIn("SHOBS-P's catalog cache", got["service"])
+            self.assertEqual(len(got["stars"]), 15)                      # APASS and Gaia merged, the far star out
+            self.assertTrue(all(s["catalog"] == "APASS DR9" for s in got["stars"]))
+            with self.assertRaisesRegex(catalogs.CatalogError, "does not cover this field"):
+                catalogs.fetch_field(200.0, -40.0, 0.1, "V", fetcher=down)
+        finally:
+            catalogs.shobs_p_cache_dir = old_dir
         notes = []
         self.assertEqual(catalogs.fetch_variables(10.0, 20.0, 0.1, fetcher=down, notes=notes), [])
         self.assertIn("VSX", notes[0])
