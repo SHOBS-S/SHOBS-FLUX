@@ -66,11 +66,12 @@ DEFAULT_EXPOSURES = (0.05, 0.1, 0.2, 0.3, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0, 5.
 
 def make_ladder(folder: str, shape=(256, 320), gain=0.25, read_noise=1.4, bias=500.0, full_well=15000.0,
                 nonlin=0.03, t_offset=0.0, bayer: str | None = "RGGB", adc_bits=16, rates=None,
-                exposures=DEFAULT_EXPOSURES, bias_pairs=5, drift_per_frame=0.0, lit_bias: float = 0.0,
+                exposures=DEFAULT_EXPOSURES, bias_pairs=5, drift_per_frame=0.0, lit_bias: float = 0.0, lit_white: bool = False,
                 seed=7, instrume="Synthetic Bench Cam") -> dict:
     """Write a bias + flat-pair ladder into folder (ASIAIR-like names). Returns what went in. drift_per_frame: the
     panel's fractional change per frame shot (0.001 = 0.1 % per frame). lit_bias: e⁻/s/px of panel light leaking
-    into the 'bias' frames (shot at 1 ms with the panel on), as on 27 Oct."""
+    into the 'bias' frames (shot at 1 ms with the panel on), as on 27 Oct: in the flats' colors (the panel), or the same
+    in every color (lit_white=True: room light)."""
     os.makedirs(folder, exist_ok=True)
     rng = np.random.default_rng(seed)
     if rates is None:
@@ -90,7 +91,13 @@ def make_ladder(folder: str, shape=(256, 320), gain=0.25, read_noise=1.4, bias=5
                   adc_bits=adc_bits)
     for i in range(2 * bias_pairs):
         t_b = 0.001 if lit_bias else 0.0
-        lr = {k: lit_bias for k in rates} if lit_bias else {k: 0.0 for k in rates}
+        if lit_bias and lit_white:
+            lr = {k: lit_bias for k in rates}
+        elif lit_bias:                         # panel light: each color in the flats' proportions (lit_bias = brightest)
+            top = max(rates.values())
+            lr = {k: lit_bias * v / top for k, v in rates.items()}
+        else:
+            lr = {k: 0.0 for k in rates}
         put("bias", t_b, flat_frame(shape, lr, t_b, t_offset=0.0, rng=rng, **common), i + 1)
     for t in exposures:
         for i in range(2):

@@ -239,11 +239,17 @@ class CameraPage:
             "bench", res.folder, res.summary, camera_id=pid, n_frames=2 * (res.n_flat_pairs + res.n_bias_pairs),
             status=res.status, app=settings.WRITTEN_BY, values=bench.run_values(res, pid))
         settings.log(f"bench run {res.folder} ({res.status}; run {self.run_key}): gain {res.gain:.4f}")
-        self.show_lines()
-        self.show_values()
-        self.show_pairs()
-        self.draw()
         self.save_btn.configure(state="normal")
+        try:
+            self.show_lines()
+            self.show_values()
+            self.show_pairs()
+            self.draw()
+        except Exception as exc:                          # the run is measured and saveable even if a view fails
+            import traceback
+            settings.log(f"showing bench run {self.run_key} failed: {exc!r}\n{traceback.format_exc()}")
+            self._say(f"⚠ The run finished, but part of the page could not be drawn ({exc}). Details are in "
+                      f"{settings.log_path()}.")
         g = f"gain {res.gain:.4f} e⁻/ADU"
         rn = f", read noise {res.read_noise_e:.2f} e⁻" if math.isfinite(res.read_noise_e) else ""
         self.app.set_status(f"Bench run: {g}{rn}; {res.n_flat_pairs} flat pairs, {res.n_bias_pairs} bias pairs."
@@ -363,6 +369,11 @@ class CameraPage:
                 settings.save(self.app.prefs)
         pid = self.camera_id()
         old = sp.find_camera_profile(pid)
+        path = sp.profile_path("cameras", pid, make=False)
+        if old is None and os.path.exists(path):
+            self._say(f"✖ The camera profile {pid} exists but cannot be read, so it was not replaced. Fix or move "
+                      f"{path} first (Profiles page shows why).")
+            return
         changes = bench.changes_for(res, old)
         SaveDialog(self, pid, old, changes, name)
 
@@ -493,8 +504,10 @@ class PlanDialog(tk.Toplevel):
             if self.src.get() == "run" and page.res is not None:
                 res = page.res
                 rates = {c: ch.rate for c, ch in res.channels.items() if math.isfinite(ch.rate)}
-                bias = res.bias_adu if math.isfinite(res.bias_adu) else float(
-                    min(ch.bias_adu for ch in res.channels.values() if math.isfinite(ch.bias_adu)))
+                finite = [ch.bias_adu for ch in res.channels.values() if math.isfinite(ch.bias_adu)]
+                off = res.setup.get("offset")
+                bias = res.bias_adu if math.isfinite(res.bias_adu) else (
+                    min(finite) if finite else (10.0 * off if off else 0.0))
                 sat = res.saturation_adu if math.isfinite(res.saturation_adu) else 65535.0
                 s = res.setup
                 head = (f"From the bench run on {os.path.basename(res.folder)} (signal rates per second: " +

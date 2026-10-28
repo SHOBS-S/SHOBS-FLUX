@@ -105,6 +105,60 @@ class TestBench(TempData):
         self.assertGreater(abs(r.drift_pct), 1.0)
         self.assertEqual(r.status, "warn")
 
+    def test_small_panel_leak_caught(self):
+        folder, t = self.ladder(lit_bias=3000.0)            # about 12 ADU of panel light in green
+        r = bench.run_bench(folder, REGION)
+        self.assertTrue(r.lit_bias, r.lines)
+
+    def test_white_leak_on_zwo_warned(self):
+        folder, t = self.ladder(lit_bias=20000.0, lit_white=True, instrume="ZWO ASI2600MC Air")
+        r = bench.run_bench(folder, REGION)
+        self.assertTrue(r.lit_bias or any("OFFSET" in x for _, x in r.lines), r.lines)
+        self.assertNotEqual(r.status, "ok")
+
+    def test_clean_bias_never_flagged(self):
+        for seed in (1, 2, 3, 4):
+            folder, t = self.ladder(f"clean{seed}", seed=seed, instrume="ZWO ASI2600MC Air")
+            r = bench.run_bench(folder, REGION)
+            self.assertFalse(r.lit_bias, (seed, r.lines))
+            self.assertFalse(any("OFFSET" in x for _, x in r.lines), (seed, r.lines))
+
+    def test_egain_compared_per_camera_adu(self):
+        from astropy.io import fits
+        import frames
+        folder, t = self.ladder(adc_bits=12)
+        for p in frames.list_frames(folder):              # a 12-bit camera's EGAIN is per its own ADU: 16 × file
+            with fits.open(p, mode="update") as h:
+                h[0].header["EGAIN"] = t["gain"] * 16
+        r = bench.run_bench(folder, REGION)
+        line = next(x for _, x in r.lines if x.startswith("✔ Gain"))
+        pct = float(line.split("(")[-1].split("%")[0])
+        self.assertLess(abs(pct), 3.0, line)
+
+    def test_image_in_extension(self):
+        from astropy.io import fits
+        folder, t = self.ladder(exposures=(0.05, 0.1, 0.2, 0.3, 0.5, 1.0, 2.0, 4.0))
+        import frames
+        for p in frames.list_frames(folder):
+            with fits.open(p) as h:
+                data, hdr = h[0].data, h[0].header.copy()
+            prim = fits.PrimaryHDU()
+            ext = fits.ImageHDU(data=data, header=hdr)
+            fits.HDUList([prim, ext]).writeto(p, overwrite=True)
+        r = bench.run_bench(folder, REGION)
+        self.assertNear(r.gain, t["gain"], 0.03, "gain from extension HDUs")
+
+    def test_derived_bias_uses_spec_read_noise(self):
+        folder, t = self.ladder(bias_pairs=0)
+        r = bench.run_bench(folder, REGION)
+        self.assertTrue(any("read noise is not known" in x for _, x in r.lines))
+
+    def test_offset_sigma_not_shrunk(self):
+        folder, t = self.ladder(t_offset=0.005)
+        r = bench.run_bench(folder, REGION)
+        per = [ch.t_offset_sigma for ch in r.channels.values()]
+        self.assertAlmostEqual(r.t_offset_sigma, min(per))
+
     def test_problems(self):
         empty = self.path("empty")
         os.makedirs(empty)

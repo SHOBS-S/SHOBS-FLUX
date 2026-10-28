@@ -270,7 +270,21 @@ def read_header(path: str) -> dict:
     try:
         from astropy.io import fits
         with fits.open(path, memmap=False, lazy_load_hdus=True) as hdul:
-            return {str(k): v for k, v in hdul[0].header.items() if k not in ("COMMENT", "HISTORY", "")}
+            header = {str(k): v for k, v in hdul[0].header.items() if k not in ("COMMENT", "HISTORY", "")}
+            if int(hdul[0].header.get("NAXIS", 0) or 0) < 2:
+                # the image lives in an extension (compressed .fz, or a primary that holds only keywords): its
+                # header gives the size and usually EXPTIME / IMAGETYP; the primary's own keywords stay first
+                for hdu in hdul[1:]:
+                    hh = hdu.header
+                    if int(hh.get("NAXIS", 0) or 0) >= 2 or int(hh.get("ZNAXIS", 0) or 0) >= 2:
+                        for k, v in hh.items():
+                            if k not in ("COMMENT", "HISTORY", ""):
+                                header.setdefault(str(k), v)
+                        if hh.get("ZNAXIS1"):
+                            header["NAXIS1"], header["NAXIS2"] = hh.get("ZNAXIS1"), hh.get("ZNAXIS2")
+                        header["NAXIS"] = 2
+                        break
+            return header
     except FileNotFoundError:
         raise FrameError("the file is not there") from None
     except OSError as exc:

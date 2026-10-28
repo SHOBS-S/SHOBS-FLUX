@@ -122,8 +122,13 @@ def scan_folder(folder: str, step=None, bias_folder: str | None = None) -> Scan:
         kind = fr.kind_of(h, p)
         t = fr.exptime_of(h)
         when = str(h.get("DATE-OBS") or h.get("DATE") or "")
-        if p in bias_paths and kind in ("dark", "unknown", "light") and (t is None or t <= 0.01):
-            kind = "bias"                      # in the bias folder, a very short frame is a bias whatever it says
+        if p in bias_paths:
+            if kind in ("dark", "unknown", "light") and (t is None or t <= 0.01):
+                kind = "bias"                  # in the bias folder, a very short frame is a bias whatever it says
+            elif kind != "bias":
+                sc.notes.append(("info", f"{os.path.basename(p)} in the bias folder is not a bias frame ({kind}); "
+                                         "left out."))
+                continue
         infos.append(FrameInfo(p, kind, t, h, shape, fr.bayer_of(h), when or os.path.basename(p)))
     if bias_paths:
         separate = [f for f in infos if f.path in set(bias_paths) and f.kind == "bias"]
@@ -163,6 +168,9 @@ def scan_folder(folder: str, step=None, bias_folder: str | None = None) -> Scan:
         sc.problems.append(f"the frames are not all the same size ({', '.join(f'{s[1]}×{s[0]}' for s in shapes if s)})")
         return sc
     sc.shape = next(iter(shapes))
+    if sc.shape is None:
+        sc.problems.append("the frames' headers give no image size (NAXIS1 / NAXIS2)")
+        return sc
     bayers = {f.bayer for f in used}
     sc.bayer = next(iter(bayers)) if len(bayers) == 1 else None
     if len(bayers) > 1:
@@ -350,6 +358,7 @@ class BenchResult:
     n_flat_pairs: int = 0
     n_bias_pairs: int = 0
     lit_bias: bool = False
+    rn_hint_source: str | None = None                  # where the read noise used for a derived bias came from
     bias_light: dict = field(default_factory=dict)     # ch → (correlation with the flat pattern, ADU implied)
     temp_c: float | None = None
     date: str = ""
@@ -494,15 +503,31 @@ def run_bench(folder: str, region_name: str = DEFAULT_REGION, step=None, scan: S
     if sc.bias_pairs:
         lv = {c: float(np.median(bias_lv[c])) for c in chans}
         rn = {c: float(np.median(bias_rn[c])) for c in chans}
+        why = []
         if len(chans) == 3:
             spread = max(lv.values()) - min(lv.values())
             if spread > max(15.0, 4.0 * max(rn.values())):
                 lit = True
+                why.append("the colors' levels differ")
+            # panel light reaches each color in proportion to that color's brightness in the flats; one ADC gives
+            # every color the same bias, so a bias level that follows the flats' colors means light got in
+            rates = {c: raw[len(raw) // 3][1][c].ma - raw[0][1][c].ma for c in chans}
+            if all(r > 0 for r in rates.values()):
+                x = np.array([rates[c] for c in chans])
+                y = np.array([lv[c] for c in chans])
+                k = float(np.polyfit(x, y, 1)[0]) if np.ptp(x) > 0 else 0.0
+                leak = k * float(x.max())
+                if leak > 4.0 and leak > 0.25 * max(rn.values()) and \
+                        np.argmax(y) == np.argmax(x) and np.argmin(y) == np.argmin(x):
+                    lit = True
+                    why.append("their levels follow the flats' colors")
         dim = min((raw[0][1][c].ma for c in chans), default=float("inf"))
         if any(v > dim for v in lv.values()):
             lit = True
+            why.append("they are brighter than the dimmest flat")
         # the flats' pattern in the bias frames: a mid-ladder pair well below saturation
         res.bias_light = {}
+        zs = []
         for c in chans:
             mid = [m for _, mom in raw for m in [mom[c]] if m.n_sat == 0 and 0.5 * (m.ma + m.mb) - lv[c] >
                    20 * max(rn[c], 1.0) and 0.5 * (m.ma + m.mb) < lv[c] + 0.6 * (sat_level - lv[c])]
@@ -510,13 +535,18 @@ def run_bench(folder: str, region_name: str = DEFAULT_REGION, step=None, scan: S
                 continue
             fb = max(mid, key=lambda m: m.ma).blocks
             bb = np.mean(bias_blocks[c], axis=0)
-            r, slope = light_in_bias(bb, fb)
-            res.bias_light[c] = (r, slope)
-            if r > 0.6 and slope > max(2.0, 0.5 * rn[c]):
+            z, slope = light_in_bias(bb, fb)
+            res.bias_light[c] = (z, slope)
+            if math.isfinite(z):
+                zs.append((z, slope, rn[c]))
+        if zs:
+            z_all = sum(z for z, _, _ in zs) / math.sqrt(len(zs))
+            if z_all > 5.0 and np.median([s for _, s, _ in zs]) > max(2.0, 0.5 * max(r for _, _, r in zs)):
                 lit = True
+                why.append("they carry the flats' pattern")
         if lit:
             res.lit_bias = True
-            res.add("bad", "✖ The bias frames saw light (they carry the flats' pattern; levels " +
+            res.add("bad", f"✖ The bias frames saw light ({'; '.join(why) or 'checks'}; levels " +
                     ", ".join(f"{c} {lv[c]:.0f}" for c in chans) + " ADU), so the panel or room light reached the "
                     "sensor. Read noise cannot be measured from them, and the bias level is worked out from the "
                     "flats instead. Shoot bias pairs again with the panel OFF and the scope capped.",
@@ -526,10 +556,34 @@ def run_bench(folder: str, region_name: str = DEFAULT_REGION, step=None, scan: S
                 ch = res.channels[c]
                 ch.bias_adu, ch.bias_source = lv[c], "measured"
                 ch.read_noise_adu = rn[c]
+            # ZWO cameras put the bias near 10 ADU per OFFSET step (16-bit files): a level well above that hints at
+            # a little light the other checks could not see
+            h0 = sc.bias_pairs[0].a.header
+            off = fr.hfloat(h0, "OFFSET")
+            inst = str(h0.get("INSTRUME") or "")
+            if off and off > 0 and res.adu_step == 1 and inst.upper().startswith("ZWO"):
+                want = 10.0 * off
+                got = float(np.mean(list(lv.values())))
+                if got > 1.03 * want + 8.0:
+                    res.add("warn", f"⚠ The bias level ({got:,.0f} ADU) is above what OFFSET {off:g} gives on a ZWO "
+                                    f"camera (about {want:,.0f}): the bias frames may have seen a little light, which "
+                                    "would make the read noise come out high. Check that the scope was capped and the "
+                                    "panel off.", short="bias higher than OFFSET suggests")
 
-    # per channel PTC
+    # per channel PTC; with no clean bias frames, a known read noise (profile or spec) sharpens the derived bias
+    rn_hint = None
+    res.rn_hint_source = None
+    if not any(ch.bias_source == "measured" for ch in res.channels.values()):
+        try:
+            import instrument
+            cam = instrument.camera_in_use(sc.setup)
+            if cam.source("read_noise_e") not in ("estimate", "none"):
+                rn_hint = cam.value("read_noise_e")
+                res.rn_hint_source = cam.source("read_noise_e")
+        except Exception:                                  # a hint only: never stops the run
+            rn_hint = None
     for c in chans:
-        _channel(res.channels[c], raw, c, q, sat_level, res.adu_step)
+        _channel(res.channels[c], raw, c, q, sat_level, res.adu_step, rn_hint_e=rn_hint)
     # a bias worked out from the flats: one level for all colors (one ADC), each color's own estimate is noisier
     derived = [res.channels[c].bias_adu for c in chans if res.channels[c].bias_source == "derived"]
     if len(chans) > 1 and len(derived) == len(chans):
@@ -537,7 +591,7 @@ def run_bench(folder: str, region_name: str = DEFAULT_REGION, step=None, scan: S
         for c in chans:
             ch = res.channels[c]
             ch.bias_adu = common
-            _channel(ch, raw, c, q, sat_level, res.adu_step, derive=False)
+            _channel(ch, raw, c, q, sat_level, res.adu_step, derive=False, rn_hint_e=rn_hint)
             ch.bias_source = "derived"
     for c in chans:
         ch = res.channels[c]
@@ -572,7 +626,9 @@ def run_bench(folder: str, region_name: str = DEFAULT_REGION, step=None, scan: S
     if off:
         wo = np.array([1.0 / max(s, 1e-6) ** 2 for _, s in off])
         res.t_offset = float(np.sum(wo * np.array([o for o, _ in off])) / np.sum(wo))
-        res.t_offset_sigma = float(1.0 / math.sqrt(np.sum(wo)))
+        # the colors share exposures, panel and bias frames: their errors are not independent, so the camera-wide
+        # value is no better known than the best single color
+        res.t_offset_sigma = float(min(s for _, s in off))
     res.n_flat_pairs = len(sc.flat_pairs)
     res.drift_pct = _drift(res, raw)
     _findings(res, sc)
@@ -637,21 +693,24 @@ def pair_moments(A: np.ndarray, B: np.ndarray, sat_at: float) -> Moments:
 
 def light_in_bias(bias_blocks: np.ndarray, flat_blocks: np.ndarray) -> tuple[float, float]:
     """Did light reach the bias frames? Their large-scale pattern is compared with a flat's (vignetting, dust): a
-    bias that saw the panel carries the flat's pattern. Returns (correlation, light level in ADU implied)."""
+    bias that saw the panel carries the flat's pattern. Returns (significance z of the bias's share of the flat
+    pattern, the light level in ADU it implies). The slope is unbiased even when the leaked light's own noise hides
+    the pattern, so its significance (slope / its standard error) is the test, not the correlation."""
     if bias_blocks.size < 12 or bias_blocks.shape != flat_blocks.shape:
         return float("nan"), float("nan")
     f = flat_blocks / max(float(np.mean(flat_blocks)), 1e-9) - 1.0
     b = bias_blocks - float(np.mean(bias_blocks))
-    sf, sb = float(np.std(f)), float(np.std(b))
-    if sf <= 0 or sb <= 0:
+    sf = float(np.std(f))
+    if sf <= 0:
         return 0.0, 0.0
-    r = float(np.mean(f * b) / (sf * sb))
     slope = float(np.mean(f * b) / (sf * sf))          # ADU of bias pattern per unit of relative flat pattern
-    return r, slope
+    resid = b - slope * f
+    se = float(np.std(resid)) / (sf * math.sqrt(f.size))
+    return (slope / se if se > 0 else 0.0), slope
 
 
 def _channel(ch: ChannelResult, raw: list, c: str, q: float, sat_level: float, step: int,
-             derive: bool = True) -> None:
+             derive: bool = True, rn_hint_e: float | None = None) -> None:
     """Fill one color's PTC, linearity and timing from the flat pairs (raw: [(Pair, {ch: Moments})]). derive=False:
     keep ch.bias_adu as given (a common level for all colors)."""
     stats = []
@@ -684,7 +743,7 @@ def _channel(ch: ChannelResult, raw: list, c: str, q: float, sat_level: float, s
     fit(pts, sat_level - bias)
     if derive and ch.bias_source != "measured" and math.isfinite(ch.gain) and math.isfinite(ch.ptc_intercept):
         # V = (M − bias)/g + RN²  →  intercept on raw means = −bias/g + RN²; RN² is small next to bias/g
-        rn2 = ch.read_noise_adu ** 2 if math.isfinite(ch.read_noise_adu) else 0.0
+        rn2 = ch.read_noise_adu ** 2 if math.isfinite(ch.read_noise_adu) else ((rn_hint_e or 0.0) / ch.gain) ** 2
         b_est = (rn2 - ch.ptc_intercept) * ch.gain
         lo = min(s[1].ma for s in stats)
         if 0 <= b_est < lo:
@@ -760,6 +819,12 @@ def _fit_linearity(ch: ChannelResult, pts: list, sat_level: float) -> None:
     raw level still within ±LIN_TOL_PCT (interpolated to the first pair beyond it). Working on raw levels keeps the
     linearity independent of the bias: c is the bias plus rate × timing offset, and the offset comes out only when
     the bias was measured."""
+    ch.linear_limit_adu, ch.linear_limit_how, ch.linear_is_bound = float("nan"), "", False
+    ch.max_dev_pct = ch.rate = ch.t_offset = ch.t_offset_sigma = ch.lin_intercept = float("nan")
+    ch.n_lin = 0
+    for p in pts:
+        p.used_lin = False
+        p.deviation_pct = float("nan")
     good = [p for p in pts if not p.saturated and p.exptime > 0]
     if len(good) < 3:
         return
@@ -811,9 +876,10 @@ def _fit_linearity(ch: ChannelResult, pts: list, sat_level: float) -> None:
     lim = last_ok.mean_raw
     how = "the brightest pair still within ±{:g} %".format(LIN_TOL_PCT)
     if first_bad is not None and not first_bad.saturated and math.isfinite(first_bad.deviation_pct):
-        d0, d1 = abs(last_ok.deviation_pct), abs(first_bad.deviation_pct)
-        if d1 > d0:
-            f = (LIN_TOL_PCT - d0) / (d1 - d0)
+        d0, d1 = last_ok.deviation_pct, first_bad.deviation_pct
+        edge = LIN_TOL_PCT if d1 > 0 else -LIN_TOL_PCT       # the side of the band the curve leaves by
+        if abs(d1 - d0) > 1e-9 and min(d0, d1) <= edge <= max(d0, d1):
+            f = (edge - d0) / (d1 - d0)
             lim = last_ok.mean_raw + f * (first_bad.mean_raw - last_ok.mean_raw)
             how = f"where the curve leaves ±{LIN_TOL_PCT:g} %"
     elif first_bad is not None and first_bad.saturated:
@@ -845,8 +911,8 @@ def _full_well(ch: ChannelResult, pts: list, sat_level: float) -> None:
 
 
 def _drift(res: BenchResult, raw: list) -> float:
-    """Panel drift, %: pairs repeated at one exposure compared (in the brightest linear channel); the worst pair's
-    frame-to-frame ratio when no exposure was repeated."""
+    """Panel drift, %: pairs repeated at one exposure compared (in the brightest linear channel); NaN when no
+    exposure was repeated (the frame-to-frame ratio of each pair is reported separately, as flicker)."""
     c = max(res.channels, key=lambda k: res.channels[k].rate if math.isfinite(res.channels[k].rate) else -1)
     ch = res.channels[c]
     by_t: dict = {}
@@ -868,9 +934,13 @@ def _findings(res: BenchResult, sc: Scan) -> None:
                         if res.adu_step > 1 else "")
     gl = "Gain " + ", ".join(f"{c} {res.channels[c].gain:.4f}" for c in chans if math.isfinite(res.channels[c].gain))
     res.add("ok", f"✔ {gl} {unit}; camera {g:.4f} ± {res.gain_sigma:.4f}." +
-            (f" The header's EGAIN says {eg:.4f} ({100 * (g / eg - 1):+.1f} %)." if eg else ""))
+            (f" The header's EGAIN says {eg:.4f}" + (f" per camera ADU, i.e. {eg / res.adu_step:.4f} per file ADU"
+                                                       if res.adu_step > 1 else "") +
+             f" ({100 * (g * res.adu_step / eg - 1):+.1f} %)." if eg else ""))
     gains = [res.channels[c].gain for c in chans if math.isfinite(res.channels[c].gain)]
-    if len(gains) > 1 and (max(gains) - min(gains)) / g > 0.04:
+    sig = [res.channels[c].gain_sigma for c in chans if math.isfinite(res.channels[c].gain)]
+    spread_sig = math.sqrt(2.0) * max((x for x in sig if math.isfinite(x)), default=0.0)
+    if len(gains) > 1 and (max(gains) - min(gains)) / g > 0.04 and (max(gains) - min(gains)) > 3.0 * spread_sig:
         res.add("warn", f"⚠ The colors disagree on the gain by {100 * (max(gains) - min(gains)) / g:.0f} % (it is one "
                         "sensor, so they should agree within a few %): the panel may have drifted, or one color "
                         "has too few pairs in its straight part.",
@@ -882,7 +952,9 @@ def _findings(res: BenchResult, sc: Scan) -> None:
     else:
         b = [res.channels[c].bias_adu for c in chans if math.isfinite(res.channels[c].bias_adu)]
         res.add("info", "Read noise: not measured (needs bias pairs shot with no light)." +
-                (f" Bias level worked out from the flats: about {np.mean(b):,.0f} ADU." if b else ""))
+                (f" Bias level worked out from the flats: about {np.mean(b):,.0f} ADU" +
+                 (f" (using the {res.rn_hint_source} read noise)." if res.rn_hint_source else
+                  " (a few ADU low: the read noise is not known yet)." ) if b else ""))
     if math.isfinite(res.full_well_e):
         hows = {res.channels[c].full_well_how for c in chans if res.channels[c].full_well_how}
         res.add("ok", f"✔ Full well {res.full_well_e:,.0f} e⁻ (" + (
