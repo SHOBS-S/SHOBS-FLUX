@@ -91,9 +91,13 @@ def _hidden(name: str) -> bool:
     return name.startswith(".") and not name[1:2].isdigit()
 
 
-def find_frames(folder: str, depth: int = 2) -> list[str]:
+PROCESSED_FOLDER_WORDS = ("debayer", "calibrat", "processed", "master", "stack", "integrat", "registered")
+
+
+def find_frames(folder: str, depth: int = 2, skipped: list | None = None) -> list[str]:
     """Frames in the folder and its subfolders, down to depth levels (a dark library: '20 Sec', '180 sec', or
-    'night/DARK' and 'night/BIAS')."""
+    'night/DARK' and 'night/BIAS'). Subfolders of processed copies ('Debayered', 'SHOBS-P masters', 'Calibrated'…)
+    are not searched; their names go in skipped."""
     out = list(fr.list_frames(folder))
     if depth <= 0:
         return out
@@ -102,7 +106,11 @@ def find_frames(folder: str, depth: int = 2) -> list[str]:
     except OSError:
         return out
     for n in subs:
-        out += find_frames(os.path.join(folder, n), depth - 1)
+        if any(w in n.lower() for w in PROCESSED_FOLDER_WORDS):
+            if skipped is not None:
+                skipped.append(os.path.join(folder, n))
+            continue
+        out += find_frames(os.path.join(folder, n), depth - 1, skipped)
     return out
 
 
@@ -162,7 +170,12 @@ def scan_darks(folder: str, bias_folder: str | None = None, step=None, max_per_e
     """Find the darks and bias frames (headers only), sort them by sensor temperature and exposure, and keep up to
     max_per_exp darks per exposure. Problems that stop the run go in scan.problems; the rest are notes."""
     sc = DarkScan(folder=folder)
-    paths = find_frames(folder)
+    skipped: list = []
+    paths = find_frames(folder, skipped=skipped)
+    if skipped:
+        names = sorted({os.path.basename(p) for p in skipped})
+        sc.notes.append(("info", f"{len(skipped)} subfolder{'s' if len(skipped) != 1 else ''} of processed copies not "
+                                 f"searched ({', '.join(names)}): only frames as the camera wrote them are measured."))
     bias_paths = []
     if bias_folder and os.path.normcase(os.path.abspath(bias_folder)) != os.path.normcase(os.path.abspath(folder)):
         bias_paths = find_frames(bias_folder, depth=1)
@@ -257,10 +270,21 @@ def scan_darks(folder: str, bias_folder: str | None = None, step=None, max_per_e
     if sc.shape is None:
         sc.problems.append("the frames' headers give no image size (NAXIS1 / NAXIS2)")
         return sc
-    bayers = {f.bayer for f in infos}
-    sc.bayer = next(iter(bayers)) if len(bayers) == 1 else None
+    bayers: dict = {}
+    for f in infos:
+        bayers.setdefault(f.bayer, []).append(f)
     if len(bayers) > 1:
-        sc.notes.append(("info", "The frames disagree about the Bayer pattern; treated as mono."))
+        # a copy without the pattern (debayered, processed) next to the camera's own frames: keep the camera's
+        lead = max(bayers, key=lambda b: (b is not None, len(bayers[b])))
+        for b, fs in bayers.items():
+            if b != lead:
+                for f in fs:
+                    sc.left_out.append((f.name, f"Bayer pattern {b or 'none'}, not {lead or 'none'} like the rest "
+                                                "(a debayered or processed copy?)"))
+        infos = bayers[lead]
+        sc.bayer = lead
+    else:
+        sc.bayer = next(iter(bayers))
     darks = [f for f in infos if f.kind == "dark"]
     if not darks:
         sc.problems.append("no dark frames are left once the odd ones are set aside")
