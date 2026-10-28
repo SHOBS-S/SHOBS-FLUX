@@ -770,7 +770,11 @@ def run_folder(folder: str, channel: str = "G", step=None, catalog=None, cam_loo
     self_px = 1.5 / (meas_arcsec or 1.0)
     notes_vsx: list = []
     variables_fn = variables
-    if variables_fn is None and catalog is None:
+    if variables_fn is None and catalog is None and "cache" in str(field_doc.get("service") or "").lower() \
+            and "did not answer" in str(field_doc.get("service") or ""):
+        notes_vsx.append("VizieR did not answer, so known variable stars (VSX) could not be left out; the "
+                         "night's own check (stars that vary) still catches them.")
+    elif variables_fn is None and catalog is None:
         variables_fn = (lambda ra, dec, rad: catalogs.fetch_variables(ra, dec, rad, notes=notes_vsx))
     vsx = []
     if variables_fn is not None:

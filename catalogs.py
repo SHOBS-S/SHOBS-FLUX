@@ -389,7 +389,7 @@ def merge_field(apass: list, gaia: list, cat_band: str) -> dict:
     return {"stars": stars, "all": allpos}
 
 
-def fetch_field(ra_deg: float, dec_deg: float, radius_deg: float, cat_band: str, timeout: float = 40,
+def fetch_field(ra_deg: float, dec_deg: float, radius_deg: float, cat_band: str, timeout: float = 25,
                 fetcher=None, gaia_limit: float = GAIA_LIMIT) -> dict:
     """The catalogued stars of a field: {"stars": [{name, ra, dec, mag, catalog, bright}] (only stars with a
     magnitude in cat_band), "all": [{ra, dec, bright}] (every star, for crowding), "service": where the answer came
@@ -406,7 +406,12 @@ def fetch_field(ra_deg: float, dec_deg: float, radius_deg: float, cat_band: str,
                 inc.append(f"APASS: {why}")
         except CatalogError as exc:
             problems.append(f"APASS: {exc}")
+    # when VizieR did not answer for APASS it is down (or the network is): asking it again for Gaia would only
+    # keep the user waiting through more timeouts before the fallback
+    vizier_down = bool(problems) and band in APASS_BANDS.values()
     try:
+        if vizier_down:
+            raise CatalogError("not asked: VizieR did not answer for APASS")
         gaia_rows, why, where = vizier(GAIA, ra_deg, dec_deg, radius_deg, GAIA_COLS,
                                        constraints=[("Gmag", f"<{gaia_limit:g}")], out_max=10000, sort="Gmag",
                                        timeout=timeout, fetcher=fetcher)
