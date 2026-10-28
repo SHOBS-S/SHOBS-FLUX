@@ -149,8 +149,9 @@ def scan_folder(folder: str, step=None, bias_folder: str | None = None) -> Scan:
     if others:
         kinds = sorted({f.kind for f in others})
         sc.notes.append(("info", f"{len(others)} frame{'s' if len(others) != 1 else ''} that are not flats or "
-                                 f"biases ({', '.join(kinds)}) left out" + (" (darks come in the next version)."
-                                                                             if "dark" in kinds else ".")))
+                                 f"biases ({', '.join(kinds)}) left out" +
+                                 (" (darks have a run of their own: Measure → Dark current)." if "dark" in kinds
+                                  else ".")))
     if not used:
         sc.problems.append("no flat or bias frames found (FLUX reads IMAGETYP, or 'Flat' / 'Bias' in the file name)")
         return sc
@@ -1095,7 +1096,10 @@ def measured_records(res: BenchResult, run_key: str | None = None) -> tuple[dict
     for c, ch in res.channels.items():
         per[c] = {"gain_e_per_adu": _rec(ch.gain, "e-/ADU", ch.gain_sigma, ch.n_gain, d, cond, run_key),
                   "read_noise_e": _rec(ch.read_noise_e, "e-", None, res.n_bias_pairs, d, cond, run_key, nd=3),
-                  "linear_limit_adu": _rec(ch.linear_limit_adu, "ADU", None, None, d, cond, run_key, nd=0)}
+                  "linear_limit_adu": _rec(ch.linear_limit_adu, "ADU", None, None, d, cond, run_key,
+                                           f"at least: straight (±{LIN_TOL_PCT:g} %) to this color's brightest "
+                                           "unsaturated pair" if ch.linear_is_bound else
+                                           f"where this color leaves ±{LIN_TOL_PCT:g} % of the straight line", nd=0)}
     lead = res.channels.get("G") or next(iter(res.channels.values()))
     curve = [[round(p.mean_raw, 1), round(p.deviation_pct, 3)] for p in sorted(lead.pairs, key=lambda p: p.signal)
              if math.isfinite(p.deviation_pct) and not p.saturated]

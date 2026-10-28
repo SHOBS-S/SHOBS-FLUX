@@ -152,3 +152,30 @@ def status_text(row: dict) -> str:
         return worst.strip()
     icon = STATUS_ICON.get(status, "")
     return f"{icon} {status}".strip()
+
+
+def values_for(keys: tuple, profile_ids: list | None = None, limit: int = 2000) -> list[dict]:
+    """Measured values from earlier runs (newest first): key, channel, value, sigma, unit, date, profile_id, and the
+    run's run_key, kind and started time. profile_ids: only those camera profiles (None: all)."""
+    if not keys:
+        return []
+    try:
+        con = connect()
+        try:
+            con.row_factory = sqlite3.Row
+            q = ("SELECT v.key, v.channel, v.value, v.sigma, v.unit, v.date, v.profile_id, r.run_key, r.kind, "
+                 "r.started FROM run_values v JOIN runs r ON r.id = v.run_id WHERE v.key IN (" +
+                 ",".join("?" * len(keys)) + ")")
+            args = list(keys)
+            if profile_ids is not None:
+                if not profile_ids:
+                    return []
+                q += " AND v.profile_id IN (" + ",".join("?" * len(profile_ids)) + ")"
+                args += list(profile_ids)
+            q += " ORDER BY r.id DESC LIMIT ?"
+            args.append(limit)
+            return [dict(r) for r in con.execute(q, args).fetchall()]
+        finally:
+            con.close()
+    except (sqlite3.Error, OSError):
+        return []

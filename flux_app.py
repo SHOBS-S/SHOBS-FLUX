@@ -32,7 +32,7 @@ SUBTITLES = {
     "Check image": "Open one frame: photon counts, saturation, the sky and the stars, judged against your camera's "
                    "values. Every number says where it came from.",
     "Camera": "Bench runs: flat pairs and bias frames → gain, read noise, full well, linearity; darks → dark "
-              "current (per color for one-shot-color cameras).",
+              "current, hot pixels, edge glow (per color for one-shot-color cameras), against the maker's spec.",
     "Sky": "On-sky runs: zero point, extinction, seeing, sky brightness and scintillation per band, from SHOBS-P's "
            "on-sky log or a folder of lights.",
     "Profiles": "The camera and system profiles SHOBS-P and SHOBS-SCHED read, value by value with its source.",
@@ -508,6 +508,7 @@ class ProfilesPage:
         self.pick.bind("<<ComboboxSelected>>", lambda _e: self.show())
         self.set_btn = style.green_button(top, "Set a value…", self.set_value)
         self.set_btn.pack(side=tk.LEFT)
+        ttk.Button(top, text="Spec curves…", command=self.spec_curves).pack(side=tk.LEFT, padx=(px(app, 8), 0))
         ttk.Button(top, text="Open the data folder", command=lambda: open_folder(sp.data_dir())).pack(side=tk.RIGHT)
         self.msg_var = tk.StringVar()
         self.msg = ttk.Label(self.frame, textvariable=self.msg_var, style="Card.TLabel")
@@ -530,8 +531,9 @@ class ProfilesPage:
         vb.pack(side=tk.RIGHT, fill=tk.Y)
         self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         hint = ttk.Label(self.frame, style="Hint.TLabel", justify=tk.LEFT,
-                         text="Roll back to an earlier revision and the spec-curve editor come in later milestones. "
-                              "Every save keeps the previous revision in the history folder.")
+                         text="Spec curves… shows, types, imports and exports the maker's curves. Roll back to an "
+                              "earlier revision comes in 0.5; every save keeps the previous revision in the history "
+                              "folder.")
         hint.pack(anchor="w", fill=tk.X, pady=(px(app, 4), 0))
         follow_wrap(hint, self.frame, px(app, 10))
         self.paths: dict[str, str] = {}
@@ -584,6 +586,10 @@ class ProfilesPage:
                     continue
                 tr.insert("", "end", text=name, values=(f"{len(pts)} points", "", "spec", doc.get("entered", ""),
                                                         doc.get("source", "")))
+            dc = (doc.get("dark_current_curve") or {}).get("points")
+            if dc:
+                tr.insert("", "end", text="dark current by temperature", values=(
+                    f"{len(dc)} points", "e-/px/s", "spec", doc.get("entered", ""), doc.get("source", "")))
             return
         parents: dict = {}
         for rpath, rec in sp.iter_records(doc):
@@ -598,6 +604,15 @@ class ProfilesPage:
                 "—" if v is None else (f"{v:g}" if isinstance(v, (int, float)) else str(v)), rec.get("unit") or "",
                 SOURCE_TAG.get(rec.get("source"), rec.get("source")), rec.get("date") or "", rec.get("note") or ""))
             self.rec_paths[iid] = rpath
+
+    def spec_curves(self):
+        import spec_editor
+        inst = None
+        if self.doc and self.doc[1].get("format") == sp.CAMERA_FORMAT:
+            inst = (self.doc[1].get("camera") or {}).get("instrume")
+        self.spec_dialog = spec_editor.SpecDialog(self.app, select_instrume=inst)
+        self.spec_dialog.bind("<Destroy>", lambda e: self.refresh() if e.widget is self.spec_dialog else None,
+                              add="+")
 
     def set_value(self):
         if not self.doc:

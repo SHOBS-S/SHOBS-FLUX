@@ -793,7 +793,8 @@ def _calibration_frame(res: CheckResult, data, lin: float, sat: float, gain: flo
             res.add("ok", f"✔ Flat level fine: colors from {f_low:.0%} to {f_top:.0%} of the linear limit "
                           f"({lin:.0f} ADU).")
     else:
-        res.add("info", f"Bias and darks are measured in bench runs (Camera page, next version). The read noise "
+        res.add("info", f"Bias and darks are measured on the Camera page (bias in the bench run, darks in the dark "
+                        f"run). The read noise "
                         f"here would be about {min(c['noise_adu'] for c in res.channels.values()) * gain:.2f} e⁻ "
                         "if this is a bias frame and the gain in use is right.")
 

@@ -88,7 +88,7 @@ def camera_in_use(setup: dict, file_max_adu: float = 65535.0, temp_c=None,
         rec = sp.record(DEFAULT_GAIN, "e-/ADU", "estimate",
                         note="no EGAIN in the header and no spec for this camera: 1 e-/ADU assumed")
         cam.notes.append("⚠ The gain (e⁻ per ADU) is a plain guess: every electron count on this page is only as "
-                         "good as that. A bench run (Camera page, next version) measures it.")
+                         "good as that. A bench run (Camera page) measures it.")
     _set(cam, "gain_e_per_adu", rec)
     gain = sp.value_of(rec, DEFAULT_GAIN)
 
@@ -137,6 +137,8 @@ def camera_in_use(setup: dict, file_max_adu: float = 65535.0, temp_c=None,
     rec = from_profile("dark_current_e_per_px_s")
     curve = (spec or {}).get("dark_current_curve") or {}
     t_now = sp._finite(temp_c)
+    if rec is not None and t_now is not None and rec.get("source") == "measured":
+        rec = dark_at_temp(prof, spec, t_now) or rec
     if rec is None and t_now is not None and isinstance(curve.get("points"), list) and len(curve["points"]) >= 2:
         v = dark_from_curve(curve["points"], t_now)
         if v is not None:
@@ -161,6 +163,43 @@ def camera_in_use(setup: dict, file_max_adu: float = 65535.0, temp_c=None,
         rec = sp.record(float(spec["points"]["qe_peak"]), "fraction", "spec")
     _set(cam, "qe_peak", rec if rec is not None else sp.record(None, "fraction", "none"))
     return cam
+
+
+def dark_at_temp(profile: dict | None, spec: dict | None, temp_c: float) -> dict | None:
+    """A camera profile's measured dark current read at another sensor temperature, as a 'derived' record, or None
+    when the profile holds it at (within 1 °C of) that temperature already. Two or more measured temperatures:
+    straight lines in log(dark current) between them. One: scaled along the spec's dark-current curve, or doubling
+    every DARK_DOUBLING_C °C when there is no curve. An upper limit stays an upper limit."""
+    import math
+    block = (profile or {}).get("dark") if isinstance((profile or {}).get("dark"), dict) else {}
+    pts = [p for p in block.get("by_temp") or [] if isinstance(p, dict) and sp._finite(p.get("temp_c")) is not None
+           and sp._finite(p.get("value")) is not None and float(p["value"]) > 0]
+    if not pts:
+        return None
+    if min(abs(float(p["temp_c"]) - temp_c) for p in pts) <= 1.0:
+        return None
+    firm = [p for p in pts if not p.get("upper_limit")]
+    at_most = False
+    if len(firm) >= 2:
+        v = dark_from_curve([[p["temp_c"], p["value"]] for p in firm], temp_c)
+        how = "measured at " + " and ".join(f"{float(p['temp_c']):g}" for p in firm) + " °C"
+    else:
+        p0 = min(pts, key=lambda p: abs(float(p["temp_c"]) - temp_c))
+        t0, d0 = float(p0["temp_c"]), float(p0["value"])
+        at_most = bool(p0.get("upper_limit"))
+        curve = ((spec or {}).get("dark_current_curve") or {}).get("points")
+        s0 = dark_from_curve(curve, t0) if isinstance(curve, list) and len(curve) >= 2 else None
+        s1 = dark_from_curve(curve, temp_c) if s0 else None
+        if s0 and s1:
+            v = d0 * s1 / s0
+            how = f"measured {d0:g} at {t0:g} °C, scaled along the spec's curve"
+        else:
+            v = d0 * 2 ** ((temp_c - t0) / DARK_DOUBLING_C)
+            how = f"measured {d0:g} at {t0:g} °C, doubling every {DARK_DOUBLING_C:g} °C"
+    if v is None or not math.isfinite(v):
+        return None
+    return sp.record(round(v, 7), "e-/px/s", "derived", conditions=f"{temp_c:g} °C",
+                     note=("at most: " if at_most else "") + how + f", read at the frame's {temp_c:g} °C")
 
 
 def dark_from_curve(points, temp_c: float):
