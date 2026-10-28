@@ -767,7 +767,7 @@ class BandSummary:
     zp1: float = float("nan")
     zp1_sigma: float = float("nan")
     zp_nights: list = field(default_factory=list)       # nights used
-    zp_out: dict = field(default_factory=dict)          # night → why set aside
+    zp_out: dict = field(default_factory=dict)          # "night target" (or a night) → why set aside
     k: float = float("nan")
     k_sigma: float = float("nan")
     k_nights: list = field(default_factory=list)
@@ -885,7 +885,7 @@ def combine(results: list, replaced: list | None = None, old_profile: dict | Non
         # zero point: photometric nights only, each night once, clipped across nights
         for r in rs:
             if math.isfinite(r.zp1) and not r.photometric:
-                bs.zp_out[r.ds.night] = "not photometric (clouds or haze)"
+                bs.zp_out[f"{r.ds.night} {r.ds.target}"] = "not photometric (clouds or haze)"
         zn = _by_night([r for r in rs if r.photometric and math.isfinite(r.zp1)], lambda r: r.zp1,
                        lambda r: r.zp1_sigma)
         if zn:
