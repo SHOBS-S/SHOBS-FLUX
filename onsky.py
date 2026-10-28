@@ -59,6 +59,7 @@ BAND_COLOR = {"TG": ("G", 2), "TR": ("R", 1), "TB": ("B", 1), "CV": ("L", 4)}
 DEBAYER_COLOR = {"green": ("G", 2), "red": ("R", 1), "blue": ("B", 1), "luminance": ("L", 4)}
 
 # ---- the rules (numbers named once, quoted in the findings) ----------------------------------------------------------
+LINEAR_GUESS_ADU = 0.8 * 65535  # when no camera profile gives a linear limit
 SAT_FRACTION = 0.2            # a star saturated in more than this fraction of frames is set aside
 CAT_OFFSET_MAG = 0.15         # catalog disagreement: beyond this AND beyond CAT_OFFSET_SIGMA robust sigma
 CAT_OFFSET_SIGMA = 4.0
@@ -75,7 +76,7 @@ DEFOCUS_RATIO = 2.2           # or this many times the best in-focus run the sam
 DARK_MOON = 0.25              # Moon illuminated fraction below which a night counts as dark for the sky
 SCALE_HEIGHT_M = 8000.0       # Osborn et al. 2015
 SHORT_EXPOSURE_S = 10.0       # exposures shorter than this get their own overhead (cadence.overhead_short_s)
-SCINT_MIN_FRACTION = 0.3      # a star informs C_Y only when scintillation is at least this share of its variance
+SCINT_MIN_FRACTION = 0.5      # a star informs C_Y only when scintillation should be at least this share of its variance
 CLIP_SIGMA = 3.0              # across nights (the profile's learning rule)
 ZP_FLOOR = 0.01               # mag: the least uncertainty one night's zero point is given
 MAG = 2.5 / math.log(10.0)    # 1.0857: relative flux error → magnitudes
@@ -484,6 +485,10 @@ def analyse(ds: Dataset, k_prior: tuple | None = None, aperture_mm: float | None
         zp = ds.cat[None, :] + 2.5 * np.log10(np.where(rate > 0, rate, np.nan))
     out = res.stars_out
     lin = ds.linear_limit_adu
+    if not lin:
+        lin = LINEAR_GUESS_ADU
+        L.append(("info", f"No measured linear limit for {ds.camera_id}: stars peaking at {lin:,.0f} ADU or more are "
+                          "treated as saturated (80 % of a 16-bit range; a bench run measures it)."))
     if lin:
         sat = np.isfinite(ds.peak) & (ds.peak >= lin)
         zp[sat] = np.nan
@@ -734,14 +739,19 @@ def _scintillation(res: NightResult, zp, good, aperture_m: float, elevation_m: f
             continue
         var_obs = (rsigma(dd[ok]) / MAG) ** 2 / 2.0                       # point-to-point: slow drifts cancel
         ph = np.nanmedian(var_ph[:, i]) + np.nanmedian(np.nansum(var_ph[:, others], axis=1)) / len(others) ** 2
-        f2 = float(np.nanmedian(fac ** 2))
+        f2 = float(np.nanmean(fac ** 2))
         scint_share = 1.0 + 1.0 / len(others)
-        excess = var_obs - ph
-        if not math.isfinite(excess) or excess <= 0 or excess < SCINT_MIN_FRACTION * var_obs:
+        # which stars can tell is decided by what scintillation SHOULD be (C_Y 1.5), not by the scatter seen, so the
+        # noisy draws of faint stars do not pick themselves (that would bias C_Y high)
+        expect = 1.5 ** 2 * f2 * scint_share
+        if not (math.isfinite(var_obs) and math.isfinite(ph)) or expect < SCINT_MIN_FRACTION * (expect + ph):
             continue
-        est.append(math.sqrt(excess / scint_share / f2))
-    if len(est) >= 3:
-        res.cy = float(np.median(est))
+        est.append((var_obs - ph) / scint_share / f2)                     # C_Y², may come out below 0
+    if len(est) >= 3 and float(np.median(est)) > 0:
+        res.cy = math.sqrt(float(np.median(est)))
+        if ds.read_noise_e is None:
+            res.lines.append(("info", "The camera's read noise is not known (no camera profile): taken as 0, so C_Y "
+                                      "may read high for short exposures."))
         res.cy_n = len(est)
         res.lines.append(("info", f"Scintillation C_Y {res.cy:.2f} from {len(est)} stars (Osborn et al. 2015; "
                                   f"aperture {aperture_m * 1000:.0f} mm, site {elevation_m:.0f} m)."))
