@@ -20,6 +20,11 @@ except Exception:
     HAVE_TK = False
 
 
+def flux_app_rows() -> int:
+    import flux_app
+    return flux_app.STAR_ROWS_MAX
+
+
 @unittest.skipUnless(HAVE_TK, "needs a display (run under xvfb-run)")
 class TestApp(TempData):
     def setUp(self):
@@ -54,9 +59,23 @@ class TestApp(TempData):
             inaxes = True
             xdata = st.x / page.disp_f
             ydata = st.y / page.disp_f
+        # the star box is one row until a star is picked; the picture fills its holder
+        self.assertEqual(int(page.star_tree.cget("height")), 1)
+        app.update()
+        holder_h = page.pic_holder.winfo_height()
+        canvas_h = page.canvas.get_tk_widget().winfo_height()
+        self.assertGreater(canvas_h, 0.9 * holder_h)
         page.on_click(E())
         self.assertIs(page.selected, st)
-        self.assertGreater(len(page.star_tree.get_children()), 3)
+        n_rows = len(page.star_tree.get_children())
+        self.assertGreater(n_rows, 3)
+        self.assertEqual(int(page.star_tree.cget("height")), min(n_rows, flux_app_rows()))
+        # the History list says why, not just the status word
+        app.show_page(4)
+        hist = app.pages[4].tree
+        status = hist.set(hist.get_children()[0], "status")
+        self.assertEqual(status, page.res.summary["worst"] or "✔ ok")
+        app.show_page(0)
         # starting profile
         page.save_profile()
         self.assertTrue(app.jobs.wait(120))

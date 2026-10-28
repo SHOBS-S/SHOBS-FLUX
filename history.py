@@ -133,3 +133,22 @@ def recent_runs(limit: int = 50, kind: str | None = None) -> list[dict]:
             con.close()
     except (sqlite3.Error, OSError):
         return []
+
+
+STATUS_ICON = {"bad": "✖", "warn": "⚠", "ok": "✔"}
+
+
+def status_text(row: dict) -> str:
+    """The History list's Status column for one run: the worst finding in a few words ("✖ sky over half the linear
+    range", "⚠ read-noise-limited", "3 field stars saturated": notes carry no icon), or for older runs without it
+    the status word with its icon."""
+    status = row.get("status") or ""
+    try:
+        summary = json.loads(row.get("summary") or "{}")
+    except (TypeError, ValueError):
+        summary = {}
+    worst = summary.get("worst") if isinstance(summary, dict) else None
+    if isinstance(worst, str) and worst.strip():
+        return worst.strip()
+    icon = STATUS_ICON.get(status, "")
+    return f"{icon} {status}".strip()

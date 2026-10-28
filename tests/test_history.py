@@ -27,6 +27,18 @@ class TestHistory(TempData):
         self.assertEqual(con.execute("SELECT key, channel, value FROM run_values").fetchall(), [("sky_e", "G", 33.8)])
         con.close()
 
+    def test_status_says_why(self):
+        history.record_run("check", "a.fit", {"worst": "✖ sky over half the linear range"}, status="bad")
+        history.record_run("check", "b.fit", {"worst": "3 field stars saturated"}, status="ok")
+        history.record_run("check", "c.fit", {"n_stars": 3}, status="warn")          # an older run: no "worst"
+        history.record_run("check", "d.fit", {"worst": None}, status="ok")
+        rows = {r["source"]: history.status_text(r) for r in history.recent_runs()}
+        self.assertEqual(rows["a.fit"], "✖ sky over half the linear range")
+        self.assertEqual(rows["b.fit"], "3 field stars saturated")
+        self.assertEqual(rows["c.fit"], "⚠ warn")
+        self.assertEqual(rows["d.fit"], "✔ ok")
+        self.assertEqual(history.status_text({"status": None, "summary": "not json"}), "")
+
     def test_unwritable_database_never_raises(self):
         os.makedirs(sp.runs_db_path())          # a folder where the file should be
         self.assertIsNone(history.record_run("check", "x", {}))

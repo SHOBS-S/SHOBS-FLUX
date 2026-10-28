@@ -173,11 +173,14 @@ class CheckPage:
         pane.add(left, weight=3)
         pane.add(right, weight=2)
 
-        # the frame picture (matplotlib, made on first use so the window opens fast), the star panel under it
-        self.star_box = ttk.Frame(left, style="Card.TFrame")
-        self.star_box.pack(side=tk.BOTTOM, fill=tk.X)
+        # the frame picture (matplotlib, made on first use so the window opens fast) takes the height the star panel
+        # leaves; the star panel sits right under the picture and is as tall as its rows (fit_picture)
+        self.left = left
         self.pic_holder = ttk.Frame(left, style="Card.TFrame")
-        self.pic_holder.pack(fill=tk.BOTH, expand=True)
+        self.pic_holder.pack(side=tk.TOP, fill=tk.X)
+        self.star_box = ttk.Frame(left, style="Card.TFrame")
+        self.star_box.pack(side=tk.TOP, fill=tk.X)
+        left.bind("<Configure>", lambda _e: self.fit_picture(), add="+")
         self.pic_hint = ttk.Label(self.pic_holder, text="The frame shows here, its stars ringed: blue ✔ under the "
                                   "linear limit, amber ⚠ over it, red ✖ saturated. Click a star to see its numbers.",
                                   style="Hint.TLabel", justify=tk.LEFT)
@@ -217,7 +220,7 @@ class CheckPage:
 
         # one star (under the picture)
         ttk.Label(self.star_box, text="Star", style="Section.TLabel").pack(anchor="w", pady=(px(app, 6), 0))
-        self.star_tree = ttk.Treeview(self.star_box, columns=("v", "l2", "v2"), show="tree", height=6,
+        self.star_tree = ttk.Treeview(self.star_box, columns=("v", "l2", "v2"), show="tree", height=1,
                                       selectmode="none")
         self.star_tree.column("#0", width=px(app, 140), minwidth=px(app, 100))
         self.star_tree.column("v", width=px(app, 190), minwidth=px(app, 120))
@@ -279,17 +282,16 @@ class CheckPage:
             self.save_btn.pack_forget()
         else:
             self.save_btn.pack(side=tk.RIGHT)
-        worst = "bad" if any(k == "bad" for k, _ in res.lines) else (
-            "warn" if any(k == "warn" for k, _ in res.lines) else "ok")
+        worst = res.status
         key = history.record_run(
             "check", res.path, res.summary, camera_id=res.cam.cam_id, n_frames=1, status=worst,
             app=settings.WRITTEN_BY)
         settings.log(f"checked {res.path} ({worst}; run {key})")
-        n_bad = sum(1 for k, _ in res.lines if k == "bad")
-        n_warn = sum(1 for k, _ in res.lines if k == "warn")
+        n_bad = sum(1 for _k, t in res.lines if t.lstrip().startswith("✖"))
+        n_warn = sum(1 for _k, t in res.lines if t.lstrip().startswith("⚠"))
         flags = ", ".join(x for x in (f"{n_bad} ✖" if n_bad else "", f"{n_warn} ⚠" if n_warn else "") if x)
         self.app.set_status(f"Checked {os.path.basename(res.path)}: {len(res.stars)} stars measured"
-                            + (f"; {flags} in the findings." if flags else "; all ✔."))
+                            + (f"; {flags} in the findings." if flags else "; nothing needs action."))
 
     def show_lines(self):
         t = self.text
@@ -321,42 +323,53 @@ class CheckPage:
             tr.insert("", "end", text=label, values=(txt.replace("fraction", "").strip(), SOURCE_TAG.get(src, src)))
 
     def draw(self):
-        import numpy as np
         res = self.res
-        img = res.preview
-        if img is None:
+        if res is None or res.preview is None:
             return
         if self.canvas is None:
             from matplotlib.figure import Figure
             from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
             self.pic_hint.pack_forget()
-            self.fig = Figure(figsize=(6, 4), dpi=100)
-            self.fig.subplots_adjust(0.01, 0.01, 0.99, 0.99)
-            self.ax = self.fig.add_subplot(111)
+            # no fixed size: the canvas asks for almost nothing and then fills its holder, following every resize
+            self.fig = Figure(dpi=100, facecolor=style.CARD)      # matplotlib follows the screen scaling itself
+            self.ax = self.fig.add_axes((0.0, 0.0, 1.0, 1.0))
             self.canvas = FigureCanvasTkAgg(self.fig, master=self.pic_holder)
-            self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+            widget = self.canvas.get_tk_widget()
+            widget.configure(width=1, height=1, background=style.CARD, highlightthickness=0)
+            widget.pack(fill=tk.BOTH, expand=True)
             self.canvas.mpl_connect("button_press_event", self.on_click)
-        # display copy: block-averaged to at most ~1400 px across, asinh stretch
-        f = max(1, int(math.ceil(max(img.shape) / 1400)))
-        h, w = img.shape[0] // f * f, img.shape[1] // f * f
-        small = img[:h, :w].reshape(h // f, f, w // f, f).mean(axis=(1, 3))
-        lo, hi = np.nanpercentile(small[::2, ::2], [5.0, 99.8])
-        z = np.clip((small - lo) / max(hi - lo, 1e-6), 0, 1)
-        z = np.arcsinh(10 * z) / np.arcsinh(10)
-        self.disp_f = f
-        ax = self.ax
-        ax.clear()
-        ax.imshow(z, cmap="gray", origin="lower", interpolation="nearest")
-        ax.set_axis_off()
-        colors = {"ok": style.OK, "warn": "#e0a100", "bad": style.BAD}
-        for st in res.stars:
-            r = max(3.0, st.r95 / f)
-            ax.add_patch(_circle((st.x / f, st.y / f), r, colors[st.status], 1.2))
-            ax.text(st.x / f + r + 2, st.y / f + r + 2, str(st.n), color=colors[st.status], fontsize=7)
-        if self.selected is not None:
-            st = self.selected
-            ax.add_patch(_circle((st.x / f, st.y / f), max(6.0, st.r95 / f * 1.6), "#ffd54f", 2.0))
+        self.disp_f = draw_frame(self.ax, res, self.selected)
+        self.fit_picture()
         self.canvas.draw_idle()
+
+    def fit_picture(self):
+        """Give the picture all the height the star panel leaves, but no more than the frame's shape can use at this
+        width, so the star panel sits right under the picture (no empty band between them). Follows every resize;
+        the work is done once the window is idle (sizes are settled then)."""
+        if self.canvas is None or getattr(self, "_fit_pending", False):
+            return
+        self._fit_pending = True
+        try:
+            self.app.after_idle(self._fit_now)
+        except tk.TclError:
+            self._fit_pending = False
+
+    def _fit_now(self):
+        self._fit_pending = False
+        if self.canvas is None or self.res is None or self.res.preview is None:
+            return
+        try:
+            w, h = self.left.winfo_width(), self.left.winfo_height()
+            if w <= 1 or h <= 1:
+                return
+            ih, iw = self.res.preview.shape[:2]
+            avail = h - self.star_box.winfo_reqheight()
+            want = max(px(self.app, 60), min(avail, int(round(w * ih / max(iw, 1)))))
+            if abs(int(self.pic_holder.cget("height") or 0) - want) > 1:
+                self.pic_holder.pack_propagate(False)
+                self.pic_holder.configure(height=want)
+        except tk.TclError:
+            pass
 
     def on_click(self, event):
         if self.res is None or event.xdata is None or event.inaxes is None:
@@ -379,7 +392,9 @@ class CheckPage:
         tr = self.star_tree
         tr.delete(*tr.get_children())
         if st is None:
-            tr.insert("", "end", text="Click a star on the frame", values=("", "", ""))
+            tr.insert("", "end", text="", values=("Click a star on the frame.", "", ""))
+            tr.configure(height=1)
+            self.fit_picture()
             return
         rows = [(f"Star #{st.n}", "")] + image_check.star_detail(self.res, st)
         half = (len(rows) + 1) // 2
@@ -387,6 +402,8 @@ class CheckPage:
             a = rows[i]
             b = rows[half + i] if half + i < len(rows) else ("", "")
             tr.insert("", "end", text=a[0], values=(a[1], b[0], b[1]))
+        tr.configure(height=min(max(half, 1), STAR_ROWS_MAX))
+        self.fit_picture()
 
     def save_profile(self):
         import instrument
@@ -418,6 +435,55 @@ class CheckPage:
                                         "header / spec / estimate until bench runs measure them; type your own on "
                                         "the Profiles page.")
         self.check(res.path, keep_msg=True)
+
+
+STAR_ROWS_MAX = 7          # the star panel grows to this many rows, then scrolls
+RING_COLORS = {"ok": style.OK, "warn": "#e0a100", "bad": style.BAD}
+
+
+def draw_frame(ax, res, selected=None) -> int:
+    """Draw the checked frame on a matplotlib axes: the picture (block-averaged to at most ~1400 px across, the
+    gentle stretch of image_check.display_stretch), each measured star ringed in its status color with its number
+    beside the ring, and the selected star ringed in yellow. Display only. Returns the block size (frame pixels per
+    picture pixel)."""
+    import image_check
+    from matplotlib import patheffects
+    img = res.preview
+    f = max(1, int(math.ceil(max(img.shape) / 1400)))
+    h, w = img.shape[0] // f * f, img.shape[1] // f * f
+    small = img[:h, :w].reshape(h // f, f, w // f, f).mean(axis=(1, 3))
+    z = image_check.display_stretch(small, read_noise_limited=getattr(res, "read_noise_limited", False))
+    ax.clear()
+    ax.imshow(z, cmap="gray", origin="lower", interpolation="antialiased", vmin=0.0, vmax=1.0)
+    ax.set_aspect("equal")
+    ax.set_anchor("N")                      # spare room (a frame wider than its holder) goes below the picture
+    ax.set_axis_off()
+    halo = [patheffects.withStroke(linewidth=3.0, foreground="#000000")]
+    hgt, wid = z.shape
+    for st in res.stars:
+        r = max(3.0, st.r95 / f)
+        cx, cy = st.x / f, st.y / f
+        color = RING_COLORS.get(st.status, style.OK)
+        ax.add_patch(_circle((cx, cy), r, color, 1.2))
+        # the number sits off the ring's upper-right edge, a few points clear of it whatever the zoom; near the
+        # right or top edge of the frame it moves to the other side so it is never cut off
+        sx = -1 if cx > 0.94 * wid else 1
+        sy = -1 if cy > 0.94 * hgt else 1
+        ax.annotate(str(st.n), xy=(cx + sx * 0.71 * r, cy + sy * 0.71 * r), xytext=(sx * 2.5, sy * 2.5),
+                    textcoords="offset points", ha="left" if sx > 0 else "right",
+                    va="bottom" if sy > 0 else "top", color=_light(color), fontsize=9.5, fontweight="bold",
+                    path_effects=halo, annotation_clip=True)
+    if selected is not None:
+        ax.add_patch(_circle((selected.x / f, selected.y / f), max(6.0, selected.r95 / f * 1.6), "#ffd54f", 2.0))
+    ax.set_xlim(-0.5, z.shape[1] - 0.5)
+    ax.set_ylim(-0.5, z.shape[0] - 0.5)
+    return f
+
+
+def _light(color: str) -> str:
+    """A lighter version of a ring color for the star numbers, so they read on the dark halo."""
+    r, g, b = (int(color[i:i + 2], 16) for i in (1, 3, 5))
+    return "#{:02x}{:02x}{:02x}".format(*(int(c + (255 - c) * 0.45) for c in (r, g, b)))
 
 
 def _circle(xy, r, color, lw):
@@ -595,9 +661,9 @@ class ComingPage:
         if name == "History":
             cols = ("kind", "when", "camera", "status", "source")
             self.tree = ttk.Treeview(self.frame, columns=cols, show="headings", height=14, selectmode="none")
-            for c, w in zip(cols, (70, 190, 260, 70, 420)):
+            for c, w in zip(cols, (70, 190, 220, 300, 260)):
                 self.tree.heading(c, text=c.capitalize())
-                self.tree.column(c, width=px(app, w), stretch=(c == "source"))
+                self.tree.column(c, width=px(app, w), stretch=(c in ("status", "source")))
             self.tree.pack(fill=tk.BOTH, expand=True, pady=(px(app, 8), 0))
 
     def refresh(self):
@@ -609,9 +675,8 @@ class ComingPage:
         if self.tree is not None:
             self.tree.delete(*self.tree.get_children())
             for r in history.recent_runs(200):
-                icon = style.ICON.get(r.get("status") or "", "")
                 self.tree.insert("", "end", values=(r["kind"], r["started"], r.get("camera_id") or "",
-                                                    f"{icon} {r.get('status') or ''}", r.get("source") or ""))
+                                                    history.status_text(r), r.get("source") or ""))
 
 
 def onsky_status() -> str:
