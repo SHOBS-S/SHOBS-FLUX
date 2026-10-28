@@ -793,6 +793,8 @@ def run_folder(folder: str, channel: str = "G", step=None, catalog=None, cam_loo
         if near.any():
             n_crowd += 1
             continue
+        if chosen and np.min(np.hypot(*(xy_s[chosen] - xy_s[i]).T)) < 2 * self_px:
+            continue                          # the same star again (two catalogs' entries not merged): once only
         if len(xy_v) and np.min(np.hypot(*(xy_v - xy_s[i]).T)) < vsx_px:
             n_var += 1
             continue
