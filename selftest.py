@@ -6,6 +6,7 @@ Sections:
   1 environment (Python, NumPy, SciPy, Astropy, Matplotlib, Tkinter)
   2 the shared profile code (shobs_profile.py) and the three approved format-v1 examples, byte for byte
   3 reading frames and Check image on synthetic frames with known camera values
+  3b the bench run (photon transfer curve) on synthetic flat-pair ladders with known camera values
   4 the run history database
   5 the window (Check image on a frame, every page) — needs a display
   6 your SHOBS data folder: what is there (read only; reported, never a failure)
@@ -138,6 +139,40 @@ def s3_check():
     check("a cut-short file is reported, not a crash", cut)
 
 
+def s3b_bench():
+    import bench
+    import synth_bench
+    import shobs_profile as sp
+    folder = os.path.join(TMP, "ladder")
+    t = synth_bench.make_ladder(folder, shape=(400, 500), nonlin=0.03, t_offset=0.004)
+    r = bench.run_bench(folder, "Central 50 %")
+    check(f"gain {r.gain:.4f} e⁻/ADU", abs(r.gain / t["gain"] - 1) < 0.03, f"true {t['gain']}")
+    check(f"read noise {r.read_noise_e:.2f} e⁻", abs(r.read_noise_e / t["read_noise"] - 1) < 0.08,
+          f"true {t['read_noise']}")
+    check(f"full well {r.full_well_e:,.0f} e⁻", abs(r.full_well_e / t["full_well"] - 1) < 0.04,
+          f"true {t['full_well']:,.0f}")
+    want = t["full_well"] * math.sqrt(0.01 / t["nonlin"]) / t["gain"] + t["bias"]
+    check(f"linear limit {r.linear_limit_adu:,.0f} ADU", abs(r.linear_limit_adu / want - 1) < 0.10,
+          f"true about {want:,.0f}")
+    check(f"timing offset {1000 * r.t_offset:+.1f} ms", abs(r.t_offset - 0.004) < 0.001, "true +4.0")
+    mono = os.path.join(TMP, "ladder_mono12")
+    t = synth_bench.make_ladder(mono, shape=(400, 500), bayer=None, adc_bits=12)
+    r = bench.run_bench(mono, "Central 50 %")
+    check("mono 12-bit camera: gain per file ADU, step 16", r.adu_step == 16 and list(r.channels) == ["L"]
+          and abs(r.gain / t["gain"] - 1) < 0.04)
+    lit = os.path.join(TMP, "ladder_lit")
+    synth_bench.make_ladder(lit, shape=(400, 500), lit_bias=60000.0)
+    check("bias frames that saw light are caught", bench.run_bench(lit, "Central 50 %").lit_bias)
+    doc = bench.apply_to_profile(r, None, "selftest")
+    check("bench result makes a valid camera profile", sp.validate(doc) == [], "; ".join(sp.validate(doc)[:2]))
+    from matplotlib.figure import Figure
+    import bench_plots
+    fig = Figure(figsize=(9, 6))
+    bench_plots.draw(fig, r)
+    fig.savefig(os.path.join(TMP, "bench.png"))
+    check("PTC and linearity plots draw", os.path.getsize(os.path.join(TMP, "bench.png")) > 10000)
+
+
 def s4_history():
     import history
     key = history.record_run("check", "selftest", {"ok": True}, app="selftest")
@@ -190,6 +225,7 @@ def main() -> int:
     section("1  Environment", s1_environment)
     section("2  Shared profile code and the format-v1 examples", s2_profiles)
     section("3  Reading frames and Check image (synthetic frames)", s3_check)
+    section("3b The bench run (synthetic flat-pair ladders)", s3b_bench)
     section("4  Run history", s4_history)
     section("5  The window", s5_window)
     section("6  Your SHOBS data folder (read only)", s6_data_folder)

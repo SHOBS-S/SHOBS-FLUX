@@ -692,13 +692,6 @@ def onsky_status() -> str:
             "finishes; the Sky page will learn from all of them.")
 
 
-CAMERA_TEXT = (
-    "Coming in 0.2 (milestone 2): the bench photon transfer curve. Point FLUX at a folder of flat pairs (two frames at "
-    "each exposure, from very short to past saturation) and bias pairs at one gain, offset and temperature. FLUX "
-    "measures gain (e⁻/ADU), read noise, full well, the linearity curve and the safe linear limit, and the "
-    "exposure-timing offset, per color (R, G, B) for one-shot-color cameras, in a central region it shows you, "
-    "with a check that the panel stayed steady. The result goes into your camera profile.\n\n"
-    "Darks and dark current, with the manufacturer's curves drawn under the measured points, follow in 0.3.")
 SKY_TEXT = (
     "Coming in 0.4 (milestone 4): on-sky characterization. From SHOBS-P's on-sky log (written after every reduction) "
     "or a folder of lights: zero point per band (APASS DR9 and Gaia DR3 synthetic magnitudes; saturated, crowded and "

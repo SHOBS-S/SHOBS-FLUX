@@ -356,9 +356,12 @@ class BenchResult:
     thumb: np.ndarray | None = None                   # a small picture of one flat, for the region box
     thumb_scale: int = 1
     summary: dict = field(default_factory=dict)
+    shorts: dict = field(default_factory=dict)          # line index → the few words the History list shows
 
-    def add(self, kind: str, text: str) -> None:
+    def add(self, kind: str, text: str, short: str | None = None) -> None:
         self.lines.append((kind, text))
+        if short and kind in ("bad", "warn"):
+            self.shorts[len(self.lines) - 1] = short
 
     @property
     def status(self) -> str:
@@ -368,10 +371,13 @@ class BenchResult:
     @property
     def worst(self) -> str:
         """The worst finding in a few words (for the History list)."""
+        import re
         for want in ("bad", "warn"):
-            for k, t in self.lines:
+            for i, (k, t) in enumerate(self.lines):
                 if k == want:
-                    return t.split(":")[0][:80]
+                    if i in self.shorts:
+                        return f"{'✖' if k == 'bad' else '⚠'} {self.shorts[i]}"
+                    return re.split(r"[:(;.]", t)[0].strip()[:70]
         return ""
 
 
@@ -513,7 +519,8 @@ def run_bench(folder: str, region_name: str = DEFAULT_REGION, step=None, scan: S
             res.add("bad", "✖ The bias frames saw light (they carry the flats' pattern; levels " +
                     ", ".join(f"{c} {lv[c]:.0f}" for c in chans) + " ADU), so the panel or room light reached the "
                     "sensor. Read noise cannot be measured from them, and the bias level is worked out from the "
-                    "flats instead. Shoot bias pairs again with the panel OFF and the scope capped.")
+                    "flats instead. Shoot bias pairs again with the panel OFF and the scope capped.",
+                    short="bias frames saw light")
         else:
             for c in chans:
                 ch = res.channels[c]
@@ -866,7 +873,8 @@ def _findings(res: BenchResult, sc: Scan) -> None:
     if len(gains) > 1 and (max(gains) - min(gains)) / g > 0.04:
         res.add("warn", f"⚠ The colors disagree on the gain by {100 * (max(gains) - min(gains)) / g:.0f} % (it is one "
                         "sensor, so they should agree within a few %): the panel may have drifted, or one color "
-                        "has too few pairs in its straight part.")
+                        "has too few pairs in its straight part.",
+                short="colors disagree on the gain")
     if math.isfinite(res.read_noise_e):
         res.add("ok", f"✔ Read noise {res.read_noise_e:.2f} e⁻ (" + ", ".join(
             f"{c} {res.channels[c].read_noise_e:.2f}" for c in chans if math.isfinite(res.channels[c].read_noise_e))
@@ -897,7 +905,8 @@ def _findings(res: BenchResult, sc: Scan) -> None:
             res.add("ok", f"✔ Linear limit {res.linear_limit_adu:,.0f} ADU (±{LIN_TOL_PCT:g} %; {per}). "
                           f"{worst}: {res.channels[worst].linear_limit_how}.")
     else:
-        res.add("warn", "⚠ The linear limit could not be found: too few unsaturated pairs at different exposures.")
+        res.add("warn", "⚠ The linear limit could not be found: too few unsaturated pairs at different exposures.",
+                short="linear limit not found")
     if math.isfinite(res.t_offset):
         sig = res.t_offset_sigma if math.isfinite(res.t_offset_sigma) else 0.0
         word = ("the camera exposes as long as it is told" if abs(res.t_offset) < max(3 * sig, 0.002) else
@@ -910,7 +919,7 @@ def _findings(res: BenchResult, sc: Scan) -> None:
         if abs(res.drift_pct) > 1.0:
             res.add("warn", f"⚠ The panel changed by {res.drift_pct:+.1f} % between repeated exposures: linearity "
                             "numbers carry that much doubt. Let the panel warm up, and shoot a drift pair at the start "
-                            "and end.")
+                            "and end.", short="panel drifted")
         else:
             res.add("ok", f"✔ Panel steady: repeated exposures agree to {res.drift_pct:+.2f} %.")
     flick = []
@@ -925,12 +934,14 @@ def _findings(res: BenchResult, sc: Scan) -> None:
     usable = res.n_flat_pairs - n_sat
     if n_sat and n_sat > res.n_flat_pairs / 2:
         res.add("warn", f"⚠ {n_sat} of the {res.n_flat_pairs} flat pairs are saturated: the ladder's top half is "
-                        "wasted. The panel is brighter than planned; use the Shooting plan to fit the exposures.")
+                        "wasted. The panel is brighter than planned; use the Shooting plan to fit the exposures.",
+                short="most flat pairs saturated")
     elif n_sat:
         res.add("info", f"{n_sat} saturated pair{'s' if n_sat != 1 else ''} at the top of the ladder (good: that is "
                         "how full well and saturation are found).")
     if usable < 6:
-        res.add("warn", f"⚠ Only {usable} unsaturated flat pairs: the curve rests on few points.")
+        res.add("warn", f"⚠ Only {usable} unsaturated flat pairs: the curve rests on few points.",
+                short="few unsaturated pairs")
 
 
 def summary_of(res: BenchResult) -> dict:
