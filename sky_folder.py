@@ -53,6 +53,7 @@ SKY_GAP, SKY_WIDTH = 4.0, 8.0  # the sky ring starts this far beyond the apertur
 MIN_APERTURE = 3.0
 APERTURE_FWHM = 2.5           # aperture radius in FWHMs (each frame's own: ~99 % of a star's light)
 CENTROID_PX = 3.0             # a star's centre may move this far from its predicted place
+RECENTRE_PX = 0.5             # stars found off their places by this much (all together): apertures moved, measured again
 FOUND_FRACTION = 0.30         # a frame where fewer of its stars show is clouded
 BLIND_MIN_MATCH = 8
 MATCH_TOL_PX = 2.0
@@ -480,6 +481,27 @@ def photometry(im: Image, x: float, y: float, r: float, rin: float, rout: float)
             "found": bool(flux > 3.0 * err and flux > 0)}
 
 
+def _measure_all(im: Image, names, xy, r, rin, rout) -> dict:
+    m = {}
+    for name, (x, y) in zip(names, xy):
+        if not (math.isfinite(x) and math.isfinite(y)):
+            continue
+        ph = photometry(im, float(x), float(y), r, rin, rout)
+        if ph is not None:
+            ph["px"], ph["py"] = float(x), float(y)
+            m[name] = ph
+    return m
+
+
+def _common_offset(m: dict, names, xy):
+    """The median (found − predicted) place of the found stars, or None with fewer than 5 of them."""
+    d = [(v["x"] - v["px"], v["y"] - v["py"]) for v in m.values() if v.get("found")]
+    if len(d) < 5:
+        return None
+    d = np.array(d)
+    return float(np.median(d[:, 0])), float(np.median(d[:, 1]))
+
+
 def _detect(im: Image, n: int):
     """The n brightest star-like peaks, centred: (N, 2) measured pixels."""
     src = ic.detect_sources(im.img, max_sources=n)
@@ -840,6 +862,7 @@ def run_folder(folder: str, channel: str = "G", step=None, catalog=None, cam_loo
     pier0 = _str(f0.header, "PIERSIDE")
     rot0 = fr.hfloat(f0.header, "ROTATOR", "ROTATANG", "ROTANGLE")
     out_frames = []
+    n_recentred = 0
     n_lights = len(lights)
     for k, (p, hk) in enumerate(lights):
         say(f"Reading frame {k + 1} of {n_lights}")
@@ -875,10 +898,12 @@ def run_folder(folder: str, channel: str = "G", step=None, catalog=None, cam_loo
         meas = None
         tries = []
         wk = wcs0 if k == 0 else (wcs_of(f.header) if has_wcs(f.header) else None)
-        if wk is not None:
-            tries.append("wcs")
+        # later frames are FOLLOWED from the first (their stars found where they are); a frame's own header
+        # solution is only the fallback: capture software may carry an old plate solve while the field drifts
         if k > 0:
             tries.append("track")
+        if wk is not None:
+            tries.append("wcs")
         for how in tries:
             if how == "wcs":
                 xy = cat_xy(wk, sel_ra, sel_dec)
@@ -889,13 +914,16 @@ def run_folder(folder: str, channel: str = "G", step=None, catalog=None, cam_loo
                 T = Tk
                 xy = ref_xy @ Tk[0].T + Tk[1]
                 flipped = abs(math.degrees(math.atan2(Tk[0][1, 0], Tk[0][0, 0]))) > 90
-            m = {}
-            for name, (x, y) in zip(names, xy):
-                if not (math.isfinite(x) and math.isfinite(y)):
-                    continue
-                ph = photometry(im, float(x), float(y), r_ap, rin, rout)
-                if ph is not None:
-                    m[name] = ph
+            m = _measure_all(im, names, xy, r_ap, rin, rout)
+            # the stars sit where they sit: when they are found off their predicted places by the same amount,
+            # move every aperture by it and measure again (a fixed aperture off-centre loses light)
+            for _again in range(3):
+                off = _common_offset(m, names, xy)
+                if off is None or math.hypot(*off) < RECENTRE_PX:
+                    break
+                xy = xy + np.asarray(off)
+                m = _measure_all(im, names, xy, r_ap, rin, rout)
+                n_recentred += 1
             n_found = sum(1 for v in m.values() if v["found"])
             if m and n_found >= max(3, FOUND_FRACTION * len(m)):
                 meas = m
@@ -987,6 +1015,10 @@ def run_folder(folder: str, channel: str = "G", step=None, catalog=None, cam_loo
     for fm in out_frames:
         fm.pop("_site", None)
 
+    if n_recentred:
+        L.append(("info", f"Stars were found off their predicted places on {n_recentred} pass"
+                          f"{'es' if n_recentred != 1 else ''} (the field drifted, or a header solution was old): "
+                          "the apertures were moved onto them and measured again."))
     if res.skipped:
         why = Counter(w for _, w in res.skipped)
         L.append(("warn" if len(res.skipped) > 0.2 * n_lights else "info",
