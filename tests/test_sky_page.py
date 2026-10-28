@@ -135,6 +135,9 @@ class TestSkyPage(TempData):
             self.app.destroy()
         except Exception:
             pass
+        self.app = None
+        import gc
+        gc.collect()        # free the old window here, never later in a worker thread (Tcl_AsyncDelete)
         self.p_settings.stop()
         super().tearDown()
 

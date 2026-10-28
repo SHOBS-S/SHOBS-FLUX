@@ -620,9 +620,10 @@ def analyse(ds: Dataset, k_prior: tuple | None = None, aperture_mm: float | None
         L.append(("info", f"Extinction not measured: airmass only spanned {res.x_span:.2f} (needs {K_MIN_SPAN}); "
                           f"k = {res.k_used:.2f} used ({res.k_used_source})."))
     elif res.x_span >= K_MIN_SPAN:
+        why = ("outside the physical range " f"{K_RANGE[0]:g}–{K_RANGE[1]:g}" if not K_RANGE[0] <= k_fit <= K_RANGE[1]
+               else "too uncertain" if k_fit_s >= 0.1 else "the sky changed during the night")
         L.append(("warn", f"⚠ Extinction not measured: the fit over airmass {np.nanmin(x[ok]):.2f}–"
-                          f"{np.nanmax(x[ok]):.2f} gave k = {k_fit:.3f} ± {k_fit_s:.3f}, which is not clean "
-                          f"(outside {K_RANGE[0]:g}–{K_RANGE[1]:g}, too uncertain, or the sky changed); "
+                          f"{np.nanmax(x[ok]):.2f} gave k = {k_fit:.3f} ± {k_fit_s:.3f}, but {why}; "
                           f"k = {res.k_used:.2f} used ({res.k_used_source})."))
     L.append(("info", f"Zero point {res.zp1:.3f} ± {res.zp1_sigma:.3f} mag for 1 e⁻/s at airmass 1 "
                       f"({res.zp_mean:.3f} at airmass {res.x_mean:.2f}); {len(good)} catalogued stars, "

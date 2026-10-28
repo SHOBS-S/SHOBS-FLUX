@@ -38,6 +38,9 @@ class TestApp(TempData):
             self.app.destroy()
         except Exception:
             pass
+        self.app = None
+        import gc
+        gc.collect()        # free the old window here, never later in a worker thread (Tcl_AsyncDelete)
         super().tearDown()
 
     def test_check_save_and_profiles(self):
