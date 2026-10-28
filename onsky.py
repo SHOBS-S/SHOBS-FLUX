@@ -118,6 +118,7 @@ class Dataset:
     sky: np.ndarray                     # per frame, log units per measured pixel
     flux: np.ndarray                    # frames × stars, log units (NaN = not measured)
     peak: np.ndarray                    # frames × stars, raw ADU
+    segment: np.ndarray = None          # per frame: '' or 'flip' (SHOBS-P marks the frames after a meridian flip)
     n_frames_in_log: int = 0
     precalibrated: bool = False
     notes: list = field(default_factory=list)
@@ -300,7 +301,7 @@ def load_dataset(path_or_doc, cam_lookup=None, path: str = "") -> Dataset:
         read_noise_e=nums["read_noise_e"], aperture_px=_f(meas.get("aperture_radius_px")), names=names,
         cat=np.array(cats, dtype=float), jd=col("jd_mid"), airmass=col("airmass"), exptime=col("exptime_s"),
         focuspos=col("focuspos"), fwhm_px=col("fwhm_px"), sky=col("sky"), flux=flux, peak=peak,
-        n_frames_in_log=len(frames_in), precalibrated=pre)
+        segment=np.array([str(f.get("segment") or "") for f in keep], dtype=object), n_frames_in_log=len(frames_in), precalibrated=pre)
     if not ds.night and nf:
         ds.night = night_of(float(np.nanmin(ds.jd)))
     return ds
@@ -569,8 +570,12 @@ def analyse(ds: Dataset, k_prior: tuple | None = None, aperture_mm: float | None
             (TYPICAL_K.get(ds.catalog_band, 0.2), "typical")
         res.k_used, res.k_used_source = kp, src
         flat = zf + kp * (x - 1.0)                         # each frame's zero point moved to airmass 1
+        flat, step_mag = _segment_steps(flat, ds.segment, ok)
         keep = clipped(flat, nsig=3.0) & ok
         r = flat - np.mean(flat[keep])
+        if step_mag is not None:
+            L.append(("info", f"The zero point steps {step_mag:+.3f} mag at the meridian flip (the other pier side: "
+                              "flats or vignetting differ); the two sides are judged each about its own level."))
         res.rms = float(np.sqrt(np.mean(r[keep] ** 2)))
         res.bin_rms, nbins = binned_rms(ds.jd[keep], r[keep])
         res.photometric = bool(math.isfinite(res.bin_rms) and res.bin_rms <= PHOT_BIN_RMS
@@ -612,6 +617,33 @@ def analyse(ds: Dataset, k_prior: tuple | None = None, aperture_mm: float | None
     else:
         L.append(("info", "Scintillation not worked out: type the site elevation on the Sky page."))
     return res
+
+
+def _segment_steps(z, segment, ok):
+    """(z with each segment moved onto the first one's level, the step in mag or None) when the night has a second
+    segment (after a meridian flip) of at least 5 frames; else (z, None)."""
+    if segment is None or len(segment) != len(z):
+        return z, None
+    seg = np.asarray(segment, dtype=object)
+    names = [n for n in dict.fromkeys(seg.tolist())]
+    if len(names) < 2:
+        return z, None
+    sizes = {n: int(((seg == n) & ok).sum()) for n in names}
+    if min(sizes.values()) < 5:
+        return z, None
+    first = names[0]
+    base = float(np.median(z[(seg == first) & ok]))
+    out = np.array(z, dtype=float)
+    step = None
+    for n in names[1:]:
+        m = (seg == n)
+        lev = float(np.median(z[m & ok]))
+        out[m] = z[m] - (lev - base)
+        step = lev - base if step is None else step
+    # the profile's zero point stays the frames' own average: put the level back to the weighted mean
+    tot = sum(sizes.values())
+    mean_shift = sum(sizes[n] * (float(np.median(z[(seg == n) & ok])) - base) for n in names) / tot
+    return out + mean_shift, step
 
 
 def _seeing(res: NightResult) -> None:
