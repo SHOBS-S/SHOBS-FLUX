@@ -86,7 +86,7 @@ class TestOneNight(TempData):
         ds, t = night(airmass=(1.05, 1.6), flip_after=60, flip_step=0.03)
         r = onsky.analyse(ds, None, 356, 300)
         self.assertLess(abs(r.k - t["k"]), 0.02, r.k)
-        self.assertLess(abs(r.zp1 - t["zp1"] - 0.015), 0.02)                # the average of the two sides
+        self.assertLess(abs(r.zp1 - (t["zp1"] - 0.015)), 0.02)             # the average of the two sides
 
     def test_cloud_bump(self):
         ds, t = night(cloud_mag=0.08)
