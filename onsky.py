@@ -407,8 +407,8 @@ def linfit(x, y, nsig: float = 3.0, iters: int = 5):
 
 
 def binned_rms(jd, resid, width: float = BIN_DAYS) -> tuple[float, int, float]:
-    """(rms of the residuals averaged in bins of `width` days (bins with ≥ 3 points), the number of bins, the range
-    from the lowest bin to the highest)."""
+    """(rms of the residuals' bin medians in bins of `width` days (bins with ≥ 3 points), the number of bins, the
+    range from the lowest bin to the highest)."""
     jd = np.asarray(jd, dtype=float)
     r = np.asarray(resid, dtype=float)
     ok = np.isfinite(jd) & np.isfinite(r)
@@ -416,7 +416,7 @@ def binned_rms(jd, resid, width: float = BIN_DAYS) -> tuple[float, int, float]:
         return float("nan"), 0, float("nan")
     jd, r = jd[ok], r[ok]
     b = np.floor((jd - jd.min()) / width).astype(int)
-    means = [float(np.mean(r[b == i])) for i in np.unique(b) if (b == i).sum() >= 3]
+    means = [float(np.median(r[b == i])) for i in np.unique(b) if (b == i).sum() >= 3]   # one odd frame moves no bin
     if len(means) < 2:
         return float(np.std(r) / math.sqrt(max(len(r), 1))), len(means), 0.0
     m = np.asarray(means)
@@ -561,7 +561,7 @@ def analyse(ds: Dataset, k_prior: tuple | None = None, aperture_mm: float | None
     k_ok = False
     if res.x_span >= K_MIN_SPAN and K_RANGE[0] <= k_fit <= K_RANGE[1] and k_fit_s < 0.1:
         resid = zf - (a + b * (x - 1.0))
-        bin_rms, nbins, bin_range = binned_rms(ds.jd[keep], resid[keep])
+        bin_rms, nbins, bin_range = binned_rms(ds.jd[ok], resid[ok])     # every frame: clipping would hide haze
         k_ok = bool(math.isfinite(bin_rms) and bin_rms <= PHOT_BIN_RMS and bin_range <= PHOT_BIN_RANGE
                     and keep.mean() >= 0.8)
     if k_ok:
@@ -586,7 +586,7 @@ def analyse(ds: Dataset, k_prior: tuple | None = None, aperture_mm: float | None
             L.append(("info", f"The zero point steps {step_mag:+.3f} mag at the meridian flip (the other pier side: "
                               "flats or vignetting differ); the two sides are judged each about its own level."))
         res.rms = float(np.sqrt(np.mean(r[keep] ** 2)))
-        res.bin_rms, nbins, res.bin_range = binned_rms(ds.jd[keep], r[keep])
+        res.bin_rms, nbins, res.bin_range = binned_rms(ds.jd[ok], r[ok])
         res.photometric = bool(math.isfinite(res.bin_rms) and res.bin_rms <= PHOT_BIN_RMS
                                and res.bin_range <= PHOT_BIN_RANGE
                                and keep.sum() >= MIN_FRAMES and keep.sum() >= 0.8 * ok.sum())
