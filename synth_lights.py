@@ -71,15 +71,9 @@ def make_folder(folder: str, n_frames: int = 12, osc: bool = True, wcs: bool = T
 
     def add(name, x, y, m):
         sra, sdec = base.wcs_pix2world([[x, y]], 0)[0]
-        stars.append({"name": name, "x": float(x), "y": float(y), "ra": float(sra), "dec": float(sdec), "mag": float(m)})
+        stars.append({"name": name, "x": float(x), "y": float(y), "ra": float(sra), "dec": float(sdec),
+                      "mag": float(m)})
 
-    n_all = n_stars + n_faint
-    rr = r_px * np.sqrt(rng.uniform(0, 1, n_all))
-    th = rng.uniform(0, 2 * math.pi, n_all)
-    mags = np.concatenate([rng.uniform(mag_range[0], mag_range[1], n_stars),
-                           rng.uniform(mag_range[1], mag_range[1] + 2.0, n_faint)])
-    for i in range(n_all):
-        add(f"Synth {i + 1:03d}", centre[0] + rr[i] * math.cos(th[i]), centre[1] + rr[i] * math.sin(th[i]), mags[i])
     truth_extra = {}
     if bright_mag is not None:
         add("Synth Bright", centre[0] - 0.22 * w, centre[1] + 0.18 * h, bright_mag)
@@ -89,7 +83,21 @@ def make_folder(folder: str, n_frames: int = 12, osc: bool = True, wcs: bool = T
         add("Synth Pair A", centre[0] + 0.2 * w, centre[1] - 0.2 * h, 11.0)
         add("Synth Pair B", centre[0] + 0.2 * w + sep, centre[1] - 0.2 * h + 0.3 * sep, 11.3)
         truth_extra["pair"] = ["Synth Pair A", "Synth Pair B"]
-
+    # the field stars keep apart (6 FWHM), so that only the pair is crowded
+    min_sep = 6.0 * seeing_arcsec / raw_arcsec
+    mags = np.concatenate([rng.uniform(mag_range[0], mag_range[1], n_stars),
+                           rng.uniform(mag_range[1], mag_range[1] + 2.0, n_faint)])
+    placed = [(s["x"], s["y"]) for s in stars]
+    i = tries = 0
+    while i < len(mags) and tries < 200 * len(mags):
+        tries += 1
+        rr, th = r_px * math.sqrt(rng.uniform(0, 1)), rng.uniform(0, 2 * math.pi)
+        x, y = centre[0] + rr * math.cos(th), centre[1] + rr * math.sin(th)
+        if any((x - a) ** 2 + (y - b) ** 2 < min_sep ** 2 for a, b in placed):
+            continue
+        placed.append((x, y))
+        add(f"Synth {i + 1:03d}", x, y, mags[i])
+        i += 1
     cat_band = "V" if osc else _cat_band(filter)
     catalog = {"stars": sorted([{"name": s["name"], "ra": s["ra"], "dec": s["dec"], "mag": round(s["mag"], 4),
                                  "catalog": "synthetic", "bright": round(s["mag"], 4)} for s in stars],

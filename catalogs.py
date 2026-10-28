@@ -56,6 +56,8 @@ def band_of_filter(filter_text) -> str:
     t = str(filter_text or "").strip()
     if not t:
         return "CV"
+    if t in ("V", "B", "R", "I", "U", "Rc", "Ic"):          # capital letters: Johnson-Cousins
+        return t[0]
     low = t.lower().replace("’", "'").replace("′", "'")
     low = low.replace("sloan", "").replace("sdss", "").replace("filter", "").strip(" _-")
     if low.upper() in ("SG", "SR", "SI", "SZ", "SU"):
