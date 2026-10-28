@@ -2,7 +2,8 @@
 
 The window: a blue sidebar with the six pages, a white card in the middle, the status strip with the busy bar at the
 bottom (SHOBS House Style, as SHOBS-SCHED). Milestone 0.1 (M1) brings the Check image page, the Profiles page and
-the foundation every later page stands on; Camera, Sky and History say what they will do and when.
+the foundation every later page stands on; 0.2–0.3 add the Camera page (bench and dark runs), 0.4 the Sky page
+(on-sky runs); History says what it will do and when.
 
 Start it with the Desktop shortcut (Create shortcuts.bat), run_windows.bat, or `python flux_app.py`."""
 from __future__ import annotations
@@ -33,8 +34,8 @@ SUBTITLES = {
                    "values. Every number says where it came from.",
     "Camera": "Bench runs: flat pairs and bias frames → gain, read noise, full well, linearity; darks → dark "
               "current, hot pixels, edge glow (per color for one-shot-color cameras), against the maker's spec.",
-    "Sky": "On-sky runs: zero point, extinction, seeing, sky brightness and scintillation per band, from SHOBS-P's "
-           "on-sky log or a folder of lights.",
+    "Sky": "Learns from your nights (SHOBS-P's on-sky logs or a folder of lights): zero point, extinction, seeing, "
+           "sky brightness, scintillation and cadence per band, judging each night, into your system profile.",
     "Profiles": "The camera and system profiles SHOBS-P and SHOBS-SCHED read, value by value with its source.",
     "History": "Every run FLUX has made; trend plots of any value over time.",
 }
@@ -658,7 +659,7 @@ class ProfilesPage:
 # ---- the pages still to come ---------------------------------------------------------------------------------------
 
 class ComingPage:
-    """Camera, Sky and History in 0.1: what the page will do, when, and what is already in place for it."""
+    """A page still to come (History until 0.5): what it will do, when, and what is already in place for it."""
 
     def __init__(self, app: "App", parent, name: str, text: str, extra=None):
         self.app = app
@@ -694,24 +695,6 @@ class ComingPage:
                                                     history.status_text(r), r.get("source") or ""))
 
 
-def onsky_status() -> str:
-    d = sp.onsky_dir(make=False)
-    try:
-        n = len([x for x in os.listdir(d) if x.endswith(".json")]) if os.path.isdir(d) else 0
-    except OSError:
-        n = 0
-    if n:
-        return (f"✔ SHOBS-P's on-sky log is filling: {n} reduction{'s' if n != 1 else ''} logged so far in {d}. "
-                "The Sky page will learn from all of them.")
-    return (f"No SHOBS-P on-sky log files yet in {d}. SHOBS-P 2.2.19.1 and later write one each time a reduction "
-            "finishes; the Sky page will learn from all of them.")
-
-
-SKY_TEXT = (
-    "Coming in 0.4 (milestone 4): on-sky characterization. From SHOBS-P's on-sky log (written after every reduction) "
-    "or a folder of lights: zero point per band (APASS DR9 and Gaia DR3 synthetic magnitudes; saturated, crowded and "
-    "known-variable stars left out), extinction, seeing by focus state, sky brightness, scintillation and cadence. "
-    "Nights that disagree are set aside, not averaged in. The result goes into your system profile.")
 HISTORY_TEXT = (
     "Coming in 0.5 (milestone 5): trend plots of any value per setup and date range (zero point, extinction, seeing, "
     "read noise against the camera's spec line…), exported as PNG with the date and time, or as CSV; profile "
@@ -892,7 +875,7 @@ class App(tk.Tk):
         self.profiles_page = ProfilesPage(self, holder)
         self.pages = [self.check_page,
                       self._camera_page(holder),
-                      ComingPage(self, holder, "Sky", SKY_TEXT, extra=onsky_status),
+                      self._sky_page(holder),
                       self.profiles_page,
                       ComingPage(self, holder, "History", HISTORY_TEXT)]
         for p in self.pages:
@@ -905,6 +888,11 @@ class App(tk.Tk):
         import camera_page
         self.camera_page = camera_page.CameraPage(self, holder)
         return self.camera_page
+
+    def _sky_page(self, holder):
+        import sky_page
+        self.sky_page = sky_page.SkyPage(self, holder)
+        return self.sky_page
 
     def _place_window(self):
         try:

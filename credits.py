@@ -24,6 +24,22 @@ def citation_text(version: str) -> str:
 
 # (section, [(name, used for, citation / acknowledgement, web address)])
 CREDITS = [
+    ("Catalogs", [
+        ("APASS DR9", "Catalog magnitudes (B, V, g′, r′, i′) of the field stars the Sky page's zero point is measured "
+         "against.",
+         "Henden, A. A. et al. 2016, VizieR On-line Data Catalog II/336. This research was made use of the AAVSO "
+         "Photometric All-Sky Survey (APASS), funded by the Robert Martin Ayers Sciences Fund and NSF AST-1412587.",
+         "https://www.aavso.org/apass"),
+        ("Gaia DR3", "Field-star magnitudes where APASS has none (transformed from Gaia G, BP and RP), and star "
+         "positions.",
+         "Gaia Collaboration, Vallenari, A. et al. 2023, A&A 674, A1. This work has made use of data from the "
+         "European Space Agency (ESA) mission Gaia, processed by the Gaia Data Processing and Analysis Consortium "
+         "(DPAC).", "https://www.cosmos.esa.int/gaia"),
+        ("VizieR", "Reading APASS, Gaia and VSX for a field.",
+         "Ochsenbein, F. et al. 2000, A&AS 143, 23, doi:10.26093/cds/vizier.", "https://vizier.cds.unistra.fr"),
+        ("AAVSO VSX", "Leaving known variable stars out of the zero point.",
+         "Watson, C. L. et al. 2006, SASS 25, 47.", "https://www.aavso.org/vsx"),
+    ]),
     ("Methods", [
         ("Photon transfer", "Gain, read noise, full well, linearity and the exposure-timing offset from pairs of "
          "flats and bias frames (the Camera page's bench run: the variance of each pair's difference against its "
@@ -35,6 +51,19 @@ CREDITS = [
         ("Star finding and FWHM", "The star detector and the Gaussian FWHM fit follow SHOBS-P's.",
          "Armbrust, J. W., and Shiloh Hill Observatory, SHOBS-P: Shiloh Hill Observatory Photometry, Zenodo, "
          "doi:10.5281/zenodo.23417064.", "https://github.com/SHOBS-S/SHOBS-P"),
+        ("Gaia G → V and R", "Johnson–Cousins V and R of field stars from Gaia G and BP − RP.",
+         "Riello, M. et al. 2021, A&A 649, A3.", ""),
+        ("Gaia → Sloan", "Sloan g, r, i, z of field stars from Gaia G and BP − RP, then SDSS ugriz to the primed "
+         "u′g′r′i′z′ system.",
+         "Gaia DR3 documentation, section 5.5.1 (Carrasco, J. M. & Bellazzini, M.); Tucker, D. L. et al. 2006, "
+         "AN 327, 821.", ""),
+        ("Scintillation", "Young's C_Y from each star's frame-to-frame scatter (the Sky page), with the modified "
+         "Young approximation SHOBS-P uses.",
+         "Young, A. T. 1967, AJ 72, 747; Osborn, J. et al. 2015, MNRAS 452, 1707.", ""),
+        ("Airmass", "The airmass of frames whose header gives none.",
+         "Kasten, F. & Young, A. T. 1989, Applied Optics 28, 4735.", ""),
+        ("The Moon's phase", "The Moon's illuminated fraction for each night (the dark nights set the sky "
+         "brightness).", "Astropy (get_body).", "https://www.astropy.org"),
     ]),
     ("Design and code", [
         ("SHOBS-SCHED", "The window frame, colors, busy bar and launchers (House Style shared by the SHOBS apps).",
@@ -51,9 +80,9 @@ CREDITS = [
         ("NumPy", "Array math throughout.", "Harris, C. R. et al. 2020, Nature 585, 357.", "https://numpy.org"),
         ("SciPy", "Star finding filters and the FWHM fit.", "Virtanen, P. et al. 2020, Nature Methods 17, 261.",
          "https://scipy.org"),
-        ("Astropy", "Reading FITS files.", "Astropy Collaboration 2022, ApJ 935, 167.", "https://www.astropy.org"),
+        ("Astropy", "Reading FITS files; WCS plate solutions, times and sky coordinates (the Sky page).", "Astropy Collaboration 2022, ApJ 935, 167.", "https://www.astropy.org"),
         ("Matplotlib", "The frame picture on the Check image page; the photon transfer, linearity, dark and "
-         "measured-against-spec plots.",
+         "measured-against-spec plots; the Sky page's night plots.",
          "Hunter, J. D. 2007, Computing in Science & Engineering 9, 90.", "https://matplotlib.org"),
     ]),
 ]

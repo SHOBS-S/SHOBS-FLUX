@@ -121,6 +121,41 @@ def record_run(kind: str, source: str, summary: dict, camera_id: str | None = No
         return None
 
 
+def onsky_file_known(path: str, size: int, mtime: float) -> bool:
+    """True when this on-sky log, at this size and modification time, is already in the history (a log SHOBS-P has
+    written again since counts as new). Never raises (False when the database cannot be read)."""
+    try:
+        con = connect()
+        try:
+            row = con.execute("SELECT size, mtime FROM onsky_files WHERE path = ?",
+                              (os.path.normcase(os.path.abspath(path)),)).fetchone()
+        finally:
+            con.close()
+    except (sqlite3.Error, OSError):
+        return False
+    return row is not None and row[0] == int(size) and row[1] is not None and abs(float(row[1]) - float(mtime)) < 1e-3
+
+
+def mark_onsky_file(path: str, size: int, mtime: float, run_key: str | None = None) -> bool:
+    """Remember that this on-sky log (at this size and modification time) is in the history, with the runs.id of the
+    run that recorded it. Returns False when the database could not be written (never raises)."""
+    try:
+        con = connect()
+        try:
+            rid = None
+            if run_key:
+                row = con.execute("SELECT id FROM runs WHERE run_key = ?", (run_key,)).fetchone()
+                rid = row[0] if row else None
+            con.execute("INSERT OR REPLACE INTO onsky_files (path, size, mtime, read_at, run_id) VALUES (?,?,?,?,?)",
+                        (os.path.normcase(os.path.abspath(path)), int(size), float(mtime), sp.now_iso(), rid))
+            con.commit()
+        finally:
+            con.close()
+        return True
+    except (sqlite3.Error, OSError, TypeError, ValueError):
+        return False
+
+
 def recent_runs(limit: int = 50, kind: str | None = None) -> list[dict]:
     try:
         con = connect()
