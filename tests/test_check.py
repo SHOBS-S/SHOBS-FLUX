@@ -65,11 +65,16 @@ class TestCheck(TempData):
         sat = by_pos.get((20, 20))
         self.assertIsNotNone(sat)
         self.assertEqual(sat.status, "bad")
-        self.assertTrue(kinds(res, "bad"))
+        # field stars over the limits are plain notes (no icon), not a problem with the frame
+        notes = " ".join(kinds(res, "info"))
+        self.assertIn("field star saturated", notes)
+        self.assertIn("over the linear limit", notes)
+        self.assertFalse(any("brightest stars" in t or "field star" in t for t in kinds(res, "bad") + kinds(res, "warn")), res.lines)
+        self.assertNotEqual(res.status, "bad")
+        self.assertEqual(res.summary["worst"], "⚠ read-noise-limited")      # a ⚠ outranks the notes
         mid = by_pos.get((50, 30))
         self.assertIsNotNone(mid)
         self.assertEqual(mid.status, "warn", f"peak {mid.raw_peak:.0f}")
-        self.assertTrue(kinds(res, "warn"))
         faint = by_pos.get((65, 45))
         self.assertEqual(faint.status, "ok")
         # linear-limit time: 60 s × (limit − sky) / (peak − sky)
@@ -102,8 +107,11 @@ class TestCheck(TempData):
         self.assertEqual(res.cam.source("gain_e_per_adu"), "estimate")
         self.assertIsNone(res.scale_arcsec)
         warns = " ".join(kinds(res, "warn"))
-        self.assertIn("FOCALLEN", warns)
-        self.assertIn("plain guess", warns)
+        self.assertIn("FOCALLEN", " ".join(kinds(res, "info")))       # a missing header key is a note
+        self.assertNotIn("FOCALLEN", warns)
+        self.assertIn("plain guess", warns)                            # electron counts depend on the gain
+        self.assertEqual(res.status, "warn")
+        self.assertEqual(res.summary["worst"], "⚠ gain is a guess")
         res = ic.check_image(p, fill={"INSTRUME": "My Mono"})
         self.assertTrue(res.cam.cam_id.startswith("my-mono__"))
 
@@ -183,3 +191,158 @@ class TestReviewFixes(TempData):
         import json
         json.dumps(r, allow_nan=False)
         self.assertTrue(sp.validate({"format": sp.SPEC_FORMAT, "format_version": True, "curves": {}}))
+
+
+class TestPolish02(TempData):
+    """The 0.2 polish list (John, 28 Oct 2026)."""
+
+    def write(self, name, data, hdr):
+        return synth.write_fits(self.path(name), data, hdr)
+
+    def test_display_stretch_noise_only_is_smooth_grey(self):
+        import numpy as np
+        rng = np.random.default_rng(3)
+        img = (500.0 + rng.normal(0.0, 6.0, (300, 400))).astype("float32")      # read noise only, no stars
+        z = ic.display_stretch(img, read_noise_limited=True)
+        self.assertEqual(z.shape, img.shape)
+        self.assertGreaterEqual(float(z.min()), 0.0)
+        self.assertLessEqual(float(z.max()), 1.0)
+        self.assertLess(float(np.std(z)), 0.06, "noise must look like a smooth grey, not speckle")
+        self.assertLess(float(np.mean(z >= 0.99)), 0.001, "no saturated speckle")
+        self.assertTrue(0.03 < float(np.median(z)) < 0.5, f"sky grey level {float(np.median(z)):.2f}")
+        # stars still stand out above the sky
+        data, _hdr = synth.make_star_frame(shape=(300, 400), bayer=None, exptime=0.75, sky_e=2.0, read_noise=3.0,
+                                           stars=synth.star_list((300, 400), 10, brightest=2.0e4, margin=40))
+        z = ic.display_stretch(data, read_noise_limited=True)
+        self.assertGreater(float(z.max()), 0.9)
+        self.assertLess(float(np.std(z[np.abs(z - np.median(z)) < 0.2])), 0.06)
+
+    def test_donut_never_gives_a_tiny_fwhm(self):
+        for bayer in ("RGGB", None):
+            data, hdr = synth.make_star_frame(shape=SHAPE, donut=True, fwhm_px=12.0, bayer=bayer, read_noise=3.0,
+                                              sky_e=20.0, stars=synth.star_list(SHAPE, 25, 1.0e6, margin=90))
+            res = ic.check_image(self.write(f"donut_{bayer}.fit", data, hdr))
+            f = res.summary["fwhm_px"]
+            self.assertTrue(f is None or f >= ic.MIN_FWHM, f"summary FWHM {f}")
+            self.assertIsNotNone(res.summary["donut_d95_px"])
+            self.assertTrue(all(not math.isfinite(s.fwhm_px) or s.fwhm_px >= ic.MIN_FWHM for s in res.stars))
+        # normal stars: the true FWHM within 15 %
+        data, hdr = synth.make_star_frame(shape=SHAPE, fwhm_px=5.0, bayer=None,
+                                          stars=synth.star_list(SHAPE, 15, 2.0e5))
+        res = ic.check_image(self.write("sharp.fit", data, hdr))
+        self.assertLess(abs(res.summary["fwhm_px"] - 5.0) / 5.0, 0.15, res.summary["fwhm_px"])
+        self.assertIsNone(res.summary["donut_d95_px"])
+
+    def test_fwhm_far_below_r95_means_defocused(self):
+        # a Gaussian fit that landed on noise: tiny FWHM against a large 95 %-light radius
+        import numpy as np
+        from unittest import mock
+        img = np.zeros((10, 10), dtype="float32")
+        m = {"x": 5.0, "y": 5.0, "sky": 0.0, "r95": 20.0, "donut": False}
+        with mock.patch.object(ic, "gaussian_fwhm", return_value=1.5):
+            self.assertTrue(ic.size_of(img, m)[1])
+        with mock.patch.object(ic, "gaussian_fwhm", return_value=18.0):
+            self.assertEqual(ic.size_of(img, m), (18.0, False))
+        self.assertGreater(ic.MIN_FWHM, 1.0)
+
+    def twelve_bit(self, datamax: bool):
+        stars = [(200.0, 200.0, 3.0e6), (500.0, 300.0, 2.0e6)] + synth.star_list(SHAPE, 10, 3.0e4, seed=5)
+        data, hdr = synth.make_star_frame(shape=SHAPE, bayer=None, gain=1.0, bias=100.0, sky_e=100.0,
+                                          sat_adu=4095.0, stars=stars)
+        self.assertEqual(float(data.max()), 4095.0)
+        if datamax:
+            hdr["DATAMAX"] = 4095
+        return ic.check_image(self.write(f"mo_{datamax}.fit", data, hdr))
+
+    def test_12_bit_saturation_from_datamax(self):
+        res = self.twelve_bit(True)
+        self.assertEqual(res.frame.adu_step, 1)
+        self.assertEqual(res.cam.value("saturation_adu"), 4095.0)
+        self.assertEqual(res.cam.source("saturation_adu"), "header")
+        self.assertEqual(res.cam.value("linear_limit_adu"), round(0.8 * 4095))
+        clipped = [s for s in res.stars if s.raw_peak >= 4095]
+        self.assertEqual(len(clipped), 2)
+        self.assertTrue(all(s.status == "bad" for s in clipped))
+        self.assertIn("2 field stars saturated", " ".join(kinds(res, "info")))
+
+    def test_12_bit_saturation_from_pile_up(self):
+        res = self.twelve_bit(False)
+        self.assertEqual(res.cam.value("saturation_adu"), 4095.0)
+        self.assertEqual(res.cam.source("saturation_adu"), "estimate")
+        self.assertIn("inferred", res.cam.records["saturation_adu"]["note"])
+        self.assertEqual(sum(1 for s in res.stars if s.status == "bad"), 2)
+
+    def test_header_saturation_keywords(self):
+        self.assertEqual(ic.header_saturation({"SATURATE": 60000, "DATAMAX": 4095}, 4095.0), (60000.0, "SATURATE"))
+        self.assertEqual(ic.header_saturation({"DATAMAX": 4095}, 4095.0), (4095.0, "DATAMAX"))
+        self.assertIsNone(ic.header_saturation({"DATAMAX": 4095}, 9000.0))      # pixels above it: not saturation
+        self.assertIsNone(ic.header_saturation({"MAXADU": "nan", "DATAMAX": 0}, 100.0))
+
+    def test_processed_image(self):
+        import numpy as np
+        from astropy.io import fits
+        import frames
+        data, hdr = synth.make_star_frame(shape=SHAPE, bayer=None, stars=synth.star_list(SHAPE, 15, 2.0e5))
+        stacked = (data - 500.0) / 20000.0 + 0.01                 # calibrated, normalised, float: like a stack
+        p = self.path("stack.fits")
+        h = fits.Header()
+        h["NCOMBINE"] = 24
+        h["HISTORY"] = "ImageIntegration: 24 images"
+        fits.PrimaryHDU(stacked.astype(np.float32), header=h).writeto(p)
+        f = frames.read_frame(p)
+        yes, why = frames.is_processed(f)
+        self.assertTrue(yes)
+        self.assertIn("NCOMBINE", why)
+        res = ic.check_image(p)
+        self.assertTrue(res.lines[0][1].startswith("This is a processed image"))
+        self.assertEqual(res.lines[0][0], "info")
+        self.assertFalse(kinds(res, "bad") + kinds(res, "warn"), res.lines)
+        self.assertEqual(res.status, "ok")
+        self.assertGreater(len(res.stars), 5)
+        self.assertTrue(all(s.status == "ok" for s in res.stars))
+        self.assertLess(abs(res.summary["fwhm_px"] - 4.0) / 4.0, 0.15)
+        self.assertFalse(any("e⁻" in t for _k, t in res.lines))
+        lines = dict(ic.star_detail(res, res.stars[0]))
+        self.assertNotIn("Light in aperture", lines)
+        # float pixels with no exposure time and no keywords at all
+        fits.PrimaryHDU(stacked.astype(np.float32)).writeto(p, overwrite=True)
+        self.assertTrue(frames.is_processed(frames.read_frame(p))[0])
+        # a raw camera frame (whole numbers, INSTRUME) is not processed
+        raw = frames.read_frame(self.write("raw.fit", data, hdr))
+        self.assertEqual(frames.is_processed(raw), (False, ""))
+        # nor a raw frame saved as float by capture software (whole numbers, EXPTIME, INSTRUME)
+        h2 = fits.Header()
+        for k, v in hdr.items():
+            if k != "SIMPLE":
+                h2[k] = v
+        fits.PrimaryHDU(data.astype(np.float32), header=h2).writeto(self.path("rawf.fits"))
+        self.assertEqual(frames.is_processed(frames.read_frame(self.path("rawf.fits"))), (False, ""))
+
+    def test_processed_xisf(self):
+        import numpy as np
+        import frames
+        data, _hdr = synth.make_star_frame(shape=(200, 300), bayer=None, stars=synth.star_list((200, 300), 6, 2e5))
+        p = synth.write_xisf_float(self.path("master.xisf"), (data - 400.0) / 65535.0,
+                                   {"EXPTIME": 300.0}, history=True)
+        f = frames.read_frame(p)
+        self.assertTrue(f.float_samples)
+        self.assertTrue(frames.is_processed(f)[0])
+        p = synth.write_xisf(self.path("raw.xisf"), data, {"INSTRUME": "Mono Cam", "EXPTIME": 30.0, "GAIN": 0})
+        self.assertEqual(frames.is_processed(frames.read_frame(p)), (False, ""))
+        self.assertTrue(np.isfinite(frames.read_frame(p).data).all())
+
+    def test_status_follows_icons_and_worst(self):
+        res = ic.check_image(self.write("ok.fit", *synth.make_star_frame(
+            shape=SHAPE, sky_e=200.0, read_noise=1.5, stars=synth.star_list(SHAPE, 15, 1.0e5))))
+        self.assertEqual(res.status, "ok", res.lines)
+        self.assertIsNone(res.summary["worst"])
+        # bright sky: ✖ and the run is bad
+        data, hdr = synth.make_star_frame(shape=SHAPE, sky_e=9000.0, gain=0.25, stars=synth.star_list(SHAPE, 8))
+        res = ic.check_image(self.write("sky.fit", data, hdr))
+        self.assertEqual(res.status, "bad")
+        self.assertEqual(res.summary["worst"], "✖ sky over half the linear range")
+        for kind, text in res.lines:
+            if kind in ("bad", "warn"):
+                self.assertTrue(text.startswith({"bad": "✖", "warn": "⚠"}[kind]), text)
+            else:
+                self.assertFalse(text.startswith(("✖", "⚠")), text)

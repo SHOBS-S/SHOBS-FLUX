@@ -53,10 +53,12 @@ def _set(cam: CameraInUse, key: str, rec: dict) -> None:
     cam.records[key] = rec
 
 
-def camera_in_use(setup: dict, file_max_adu: float = 65535.0, temp_c=None) -> CameraInUse:
+def camera_in_use(setup: dict, file_max_adu: float = 65535.0, temp_c=None,
+                  header_saturation: tuple | None = None) -> CameraInUse:
     """The camera values for a frame with this setup key (shobs_profile.setup_key). file_max_adu = the largest value
     the file can hold (65535 for 16-bit files, less for a scaled 12/14-bit camera); temp_c = the sensor temperature
-    of the frame (CCD-TEMP) for the dark-current estimate."""
+    of the frame (CCD-TEMP) for the dark-current estimate; header_saturation = (ADU, keyword) when the frame's header
+    says where the camera saturates (SATURATE, MAXADU or DATAMAX), used when no saved profile gives it."""
     if not (isinstance(file_max_adu, (int, float)) and file_max_adu == file_max_adu and 0 < file_max_adu < 1e12):
         file_max_adu = 65535.0
     cam = CameraInUse(cam_id=setup.get("camera_id") or "unknown", setup=dict(setup))
@@ -102,6 +104,9 @@ def camera_in_use(setup: dict, file_max_adu: float = 65535.0, temp_c=None) -> Ca
 
     # saturation
     rec = from_profile("saturation_adu")
+    if rec is None and header_saturation:
+        hv, hk = header_saturation
+        rec = sp.record(float(hv), "ADU", "header", note=f"{hk} keyword in the frame's header")
     if rec is None:
         rec = sp.record(float(file_max_adu), "ADU", "estimate", note="the largest value the file can hold")
     _set(cam, "saturation_adu", rec)

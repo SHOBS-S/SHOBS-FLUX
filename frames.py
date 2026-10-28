@@ -38,6 +38,8 @@ class Frame:
     bits: int | None = None                # native bits implied by the step (16 → 1, 14 → 4, 12 → 16)
     setup: dict = field(default_factory=dict)
     notes: list = field(default_factory=list)
+    float_samples: bool = False            # the file stores floating-point pixels (FITS BITPIX < 0, XISF Float*)
+    history: list = field(default_factory=list)    # HISTORY lines and processing records (PixInsight), as text
 
     @property
     def name(self) -> str:
@@ -184,12 +186,21 @@ def _xisf_raw(path: str, header_only: bool = False):
         if image is None:
             raise FrameError("the XISF file holds no image")
         header: dict = {}
+        history: list[str] = []
+        for el in root.iter():
+            if el.tag.split("}")[-1] == "Property":
+                pid = el.get("id") or ""
+                if "ProcessingHistory" in pid or "Integration" in pid or "ImageIntegration" in pid:
+                    history.append(pid)
         for el in image.iter():
             if el.tag.split("}")[-1] != "FITSKeyword":
                 continue
             key = (el.get("name") or "").strip().upper()
             value = (el.get("value") or "").strip()
-            if not key or key in ("HISTORY", "COMMENT"):
+            if key == "HISTORY":
+                history.append(" ".join(x for x in (value, el.get("comment") or "") if x).strip("' "))
+                continue
+            if not key or key == "COMMENT":
                 continue
             if value.startswith("'") and value.endswith("'") and len(value) >= 2:
                 value = value[1:-1].strip()
@@ -200,6 +211,9 @@ def _xisf_raw(path: str, header_only: bool = False):
                     if value in ("T", "F"):
                         value = value == "T"
             header.setdefault(key, value)
+        if history:
+            header["_FLUX_HISTORY"] = history
+        header["_FLUX_SAMPLE_FORMAT"] = image.get("sampleFormat") or "UInt16"
         geometry = [int(v) for v in (image.get("geometry") or "0:0:1").split(":")]
         width, height = geometry[0], geometry[1]
         channels = geometry[2] if len(geometry) > 2 else 1
@@ -248,7 +262,11 @@ def _xisf_raw(path: str, header_only: bool = False):
 def read_header(path: str) -> dict:
     """The header only (fast: no pixels)."""
     if path.lower().endswith(".xisf"):
-        return _xisf(path, header_only=True)[1]
+        header = _xisf(path, header_only=True)[1]
+        header.pop("_FLUX_HISTORY", None)
+        header.pop("_FLUX_SAMPLE_FORMAT", None)
+        header.pop("_FLUX_NOTE", None)
+        return header
     try:
         from astropy.io import fits
         with fits.open(path, memmap=False, lazy_load_hdus=True) as hdul:
@@ -264,8 +282,14 @@ def read_frame(path: str) -> Frame:
     if not os.path.exists(path):
         raise FrameError("the file is not there")
     notes = []
+    history: list[str] = []
+    float_samples = False
     if path.lower().endswith(".xisf"):
         data, header = _xisf(path)
+        history = list(header.pop("_FLUX_HISTORY", None) or [])
+        float_samples = str(header.pop("_FLUX_SAMPLE_FORMAT", "")).startswith("Float")
+        if header.get("_FLUX_NOTE"):
+            notes.append(str(header.pop("_FLUX_NOTE")))
     else:
         try:
             import warnings
@@ -277,6 +301,12 @@ def read_frame(path: str) -> Frame:
                     if hdu is None:
                         raise FrameError("the FITS file holds no image (header only, or cut short)")
                     data = np.asarray(hdu.data, dtype=np.float32)
+                    float_samples = int(hdu.header.get("BITPIX", 16)) < 0
+                    for h in {id(hdul[0]): hdul[0], id(hdu): hdu}.values():
+                        try:
+                            history.extend(str(x) for x in h.header["HISTORY"])
+                        except KeyError:
+                            pass
                     header = {str(k): v for k, v in hdul[0].header.items() if k not in ("COMMENT", "HISTORY", "")}
                     if hdu is not hdul[0]:
                         for k, v in hdu.header.items():
@@ -304,13 +334,57 @@ def read_frame(path: str) -> Frame:
     step = adu_step(data)
     fr = Frame(path=path, data=data, header=header, kind=kind_of(header, path), exptime=exptime_of(header),
                bayer=bayer_of(header), adu_step=step, bits=native_bits(step), setup=sp.setup_key(header),
-               notes=notes)
+               notes=notes, float_samples=float_samples, history=history)
     if step > 1:
         fr.notes.append(f"pixel values step by {step} ADU: a {fr.bits}-bit camera scaled to 16 bits; gains are "
                         f"given per file ADU (× {step} for the camera's own ADU)")
     if fr.exptime is None:
         fr.notes.append("no EXPTIME or EXPOSURE in the header: rates per second cannot be given")
     return fr
+
+
+# ---- processed images -----------------------------------------------------------------------------------------------
+
+STACK_KEYS = ("NCOMBINE", "STACKCNT", "NSTACK", "NSUBS", "NUMSTACK", "STACKED", "NFRAMES", "SNAPSHOT")
+_PROCESSING_WORDS = ("integration", "imageintegration", "processinghistory", "histogramtransformation", "stack",
+                     "drizzle", "deconvolution", "stretch")
+
+
+def whole_numbers(data: np.ndarray, sample: int = 200_000) -> bool:
+    """True when (a sample of) the pixel values are all whole numbers, as a camera writes them."""
+    flat = np.asarray(data).ravel()
+    vals = flat[:: max(1, flat.size // sample)]
+    vals = vals[np.isfinite(vals)]
+    return bool(vals.size == 0 or np.all(np.abs(vals - np.round(vals)) < 1e-4))
+
+
+def is_processed(frame: Frame) -> tuple[bool, str]:
+    """Is this a processed image (stacked, calibrated or stretched by other software) rather than a frame as the
+    camera wrote it? Returns (True, the reason in plain words) or (False, ""). Electron counts, saturation and the
+    linear limit only mean something on a raw frame."""
+    hdr = {str(k).upper(): v for k, v in frame.header.items()}
+    for key in STACK_KEYS:
+        v = hdr.get(key)
+        if v is None or isinstance(v, bool) and not v:
+            continue
+        n = hfloat(hdr, key)
+        if n is not None and n <= 1:
+            continue
+        return True, f"stacked ({key} = {v})"
+    for v in hdr.values():
+        if isinstance(v, str) and "integration" in v.lower():
+            return True, f"stacked (header says “{v.strip()[:40]}”)"
+    for line in frame.history:
+        low = str(line).lower()
+        if any(w in low for w in _PROCESSING_WORDS):
+            return True, "the header records processing (stacking or stretching software)"
+    if not whole_numbers(frame.data):
+        return True, "the pixel values are not whole numbers, as a camera writes them"
+    if frame.float_samples and frame.exptime is None:
+        return True, "floating-point pixels and no exposure time in the header"
+    if frame.float_samples and not hdr.get("INSTRUME") and hdr.get("GAIN") is None:
+        return True, "floating-point pixels and no camera (INSTRUME) or gain in the header"
+    return False, ""
 
 
 # ---- Bayer planes and superpixels ----------------------------------------------------------------------------------

@@ -102,3 +102,31 @@ def star_list(shape=(600, 800), n=25, brightest=2.0e6, seed=2, margin=60):
         out.append((float(rng.uniform(margin, w - margin)), float(rng.uniform(margin, h - margin)), f))
         f /= 1.6
     return out
+
+
+def write_xisf_float(path: str, data, header: dict, history: bool = False) -> str:
+    """A minimal monolithic XISF 1.0 file with Float32 pixels in 0..1 (like a PixInsight master or stack), for the
+    processed-image test. history=True adds an ImageIntegration HISTORY keyword and a ProcessingHistory property."""
+    arr = np.clip(np.asarray(data, dtype="<f4"), 0.0, 1.0)
+    h, w = arr.shape
+    kws = "".join(f'<FITSKeyword name="{k}" value="{v if not isinstance(v, str) else repr(v)}" comment=""/>'
+                  for k, v in header.items() if k != "SIMPLE")
+    if history:
+        kws += '<FITSKeyword name="HISTORY" value="" comment="ImageIntegration.numberOfImages: 24"/>'
+    prop = '<Property id="PixInsight:ProcessingHistory" type="String">integration</Property>' if history else ""
+    blob = arr.tobytes()
+
+    def xml(offset):
+        return (f'<?xml version="1.0" encoding="UTF-8"?><xisf version="1.0" xmlns="http://www.pixinsight.com/xisf">'
+                f'<Image geometry="{w}:{h}:1" sampleFormat="Float32" bounds="0:1" colorSpace="Gray" '
+                f'location="attachment:{offset}:{len(blob)}">{kws}{prop}</Image></xisf>').encode("utf-8")
+
+    head = xml(0)
+    offset = 16 + len(head) + 64
+    head = xml(offset)
+    head = head + b" " * (offset - 16 - len(head))
+    with open(path, "wb") as fh:
+        fh.write(b"XISF0100" + len(head).to_bytes(4, "little") + b"\0\0\0\0")
+        fh.write(head)
+        fh.write(blob)
+    return path
