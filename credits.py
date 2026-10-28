@@ -25,8 +25,9 @@ def citation_text(version: str) -> str:
 # (section, [(name, used for, citation / acknowledgement, web address)])
 CREDITS = [
     ("Methods", [
-        ("Photon transfer", "Gain, read noise, full well and linearity from pairs of flats (Camera page, next "
-         "version); the electron counts on the Check image page.",
+        ("Photon transfer", "Gain, read noise, full well, linearity and the exposure-timing offset from pairs of "
+         "flats and bias frames (the Camera page's bench run: the variance of each pair's difference against its "
+         "signal); the electron counts on the Check image page.",
          "Janesick, J. R. 2007, Photon Transfer, SPIE Press, doi:10.1117/3.725073.", ""),
         ("The CCD equation", "Signal-to-noise of each star from its light, the sky, dark current and read noise.",
          "Howell, S. B. 2006, Handbook of CCD Astronomy, 2nd ed., Cambridge University Press.", ""),
@@ -49,7 +50,7 @@ CREDITS = [
         ("SciPy", "Star finding filters and the FWHM fit.", "Virtanen, P. et al. 2020, Nature Methods 17, 261.",
          "https://scipy.org"),
         ("Astropy", "Reading FITS files.", "Astropy Collaboration 2022, ApJ 935, 167.", "https://www.astropy.org"),
-        ("Matplotlib", "The frame picture on the Check image page.",
+        ("Matplotlib", "The frame picture on the Check image page; the photon transfer and linearity plots.",
          "Hunter, J. D. 2007, Computing in Science & Engineering 9, 90.", "https://matplotlib.org"),
     ]),
 ]
