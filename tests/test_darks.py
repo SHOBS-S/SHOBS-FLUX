@@ -157,6 +157,10 @@ class TestDarks(TempData):
         r0 = darks.run_darks(folder, REGION, scan=sc)
         self.assertEqual(r0.gain_source, "estimate")
         self.assertIn("gain not known", r0.worst)
+        self.assertEqual(r0.main.method, "mean")              # a guessed gain counts twice in the noise way
+        hint = [x for _, x in r0.lines if "hint at a gain" in x]
+        self.assertTrue(hint)
+        self.assertIn("0.2", hint[0])
         doc = darks.apply_to_profile(r0, None, "test")
         doc["values"]["gain_e_per_adu"] = sp.record(0.25, "e-/ADU", "measured")
         sp.save_profile(doc, "test")

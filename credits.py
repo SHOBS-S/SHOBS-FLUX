@@ -27,7 +27,8 @@ CREDITS = [
     ("Methods", [
         ("Photon transfer", "Gain, read noise, full well, linearity and the exposure-timing offset from pairs of "
          "flats and bias frames (the Camera page's bench run: the variance of each pair's difference against its "
-         "signal); the electron counts on the Check image page.",
+         "signal); dark current from darks, by their level and by their noise (the dark run); the electron counts "
+         "on the Check image page.",
          "Janesick, J. R. 2007, Photon Transfer, SPIE Press, doi:10.1117/3.725073.", ""),
         ("The CCD equation", "Signal-to-noise of each star from its light, the sky, dark current and read noise.",
          "Howell, S. B. 2006, Handbook of CCD Astronomy, 2nd ed., Cambridge University Press.", ""),
@@ -39,9 +40,10 @@ CREDITS = [
         ("SHOBS-SCHED", "The window frame, colors, busy bar and launchers (House Style shared by the SHOBS apps).",
          "Armbrust, J. W., and Shiloh Hill Observatory, SHOBS-SCHED: Shiloh Hill Observatory Photometry Scheduler, "
          "Zenodo, doi:10.5281/zenodo.23674791.", "https://github.com/SHOBS-S/SHOBS-SCHED"),
-        ("Camera specs", "Manufacturer's values (gain, read noise, full well against the gain setting) read by "
-         "hand from published charts; shown as spec, never as measured.", "ZWO ASI2600MC (IMX571) gain chart.",
-         "https://www.zwoastro.com"),
+        ("Camera specs", "Manufacturer's values (gain, read noise, full well against the gain setting; dark "
+         "current against the sensor temperature) read by hand from published charts; shown as spec, never as "
+         "measured, and drawn under the measured points.", "ZWO ASI2600MC (IMX571) gain, read noise, full well and "
+         "dark current charts.", "https://www.zwoastro.com"),
     ]),
     ("Libraries", [
         ("Python and Tk", "The program and its windows; SQLite (part of Python) for the run history.",
@@ -50,7 +52,8 @@ CREDITS = [
         ("SciPy", "Star finding filters and the FWHM fit.", "Virtanen, P. et al. 2020, Nature Methods 17, 261.",
          "https://scipy.org"),
         ("Astropy", "Reading FITS files.", "Astropy Collaboration 2022, ApJ 935, 167.", "https://www.astropy.org"),
-        ("Matplotlib", "The frame picture on the Check image page; the photon transfer and linearity plots.",
+        ("Matplotlib", "The frame picture on the Check image page; the photon transfer, linearity, dark and "
+         "measured-against-spec plots.",
          "Hunter, J. D. 2007, Computing in Science & Engineering 9, 90.", "https://matplotlib.org"),
     ]),
 ]

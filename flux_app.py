@@ -849,7 +849,7 @@ class App(tk.Tk):
         self.busy_bar = style.BusyBar(row, label_style="Status.TLabel", frame_style="Status.TFrame",
                                       bar_style="Status.Horizontal.TProgressbar")
         self.busy_bar.pack(side=tk.LEFT)
-        self.status_label = ttk.Label(row, textvariable=self.status_var, style="Status.TLabel")
+        self.status_label = ttk.Label(row, textvariable=self.status_var, style="Status.TLabel", anchor="w")
         self.status_label.pack(side=tk.LEFT, anchor="w", fill=tk.X, expand=True)
         line = ttk.Label(status, text=cr.STATUS_LINE, style="Status.TLabel", foreground=style.SIDE_HINT)
         line.pack(anchor="w", fill=tk.X, padx=px(self, 12), pady=(0, px(self, 4)))

@@ -728,6 +728,9 @@ def _channel(res: DarkResult, tr: TempResult, c: str, gain: float) -> DarkChanne
             ch.read_noise_e = math.sqrt(a) if a > 0 else float("nan")
     cands = [(ch.mean_sigma, "mean", ch.mean_rate), (ch.noise_sigma, "noise", ch.noise_rate)]
     cands = [x for x in cands if math.isfinite(x[0]) and x[0] > 0 and math.isfinite(x[2])]
+    if res.gain_source == "estimate" and any(x[1] == "mean" for x in cands):
+        # a guessed gain enters the noise way squared and the level way only once: trust the level way more
+        cands = [x for x in cands if x[1] == "mean"]
     if cands:
         s, how, r = min(cands)
         ch.rate, ch.sigma, ch.method = r, s, how
@@ -900,6 +903,13 @@ def _findings(res: DarkResult, sc: DarkScan) -> None:
         if bits:
             res.add("info", f"The two ways in {lead.ch}{where}: " + "; ".join(bits) + " e⁻/px/s. The smaller "
                             "uncertainty is used.")
+        if res.gain_source == "estimate" and math.isfinite(lead.mean_rate) and math.isfinite(lead.noise_rate) and \
+                lead.mean_rate > 5 * lead.mean_sigma and lead.noise_rate > 5 * lead.noise_sigma:
+            # level (ADU/s) × g = noise (ADU²/s) × g²: their ratio is a rough gain (a hint: the level way is
+            # sensitive to the bias level's drift)
+            g_hint = (lead.mean_rate / lead.gain) / (lead.noise_rate / lead.gain ** 2)
+            res.add("info", f"The darks hint at a gain of about {g_hint:.2f} e⁻/ADU (the level way ÷ the noise way). "
+                            "Only a hint: a bench run with flat pairs measures it properly.")
         if math.isfinite(lead.mean_chi2) and lead.mean_chi2 > 4 and math.isfinite(lead.mean_rate):
             res.add("info", f"The mean level of the darks jumps between exposures by more than its noise "
                             f"(χ² {lead.mean_chi2:.0f}): the bias level moved between the sessions they were shot "

@@ -7,6 +7,7 @@ Sections:
   2 the shared profile code (shobs_profile.py) and the three approved format-v1 examples, byte for byte
   3 reading frames and Check image on synthetic frames with known camera values
   3b the bench run (photon transfer curve) on synthetic flat-pair ladders with known camera values
+  3c the dark run (dark current, hot pixels, edge glow) on synthetic dark libraries, the spec curves and their plots
   4 the run history database
   5 the window (Check image on a frame, every page) — needs a display
   6 your SHOBS data folder: what is there (read only; reported, never a failure)
@@ -173,6 +174,48 @@ def s3b_bench():
     check("PTC and linearity plots draw", os.path.getsize(os.path.join(TMP, "bench.png")) > 10000)
 
 
+def s3c_darks():
+    import darks
+    import dark_plots
+    import spec_editor
+    import spec_plots
+    import synth_dark
+    import shobs_profile as sp
+    from matplotlib.figure import Figure
+    lib = os.path.join(TMP, "darks")
+    t = synth_dark.make_darks(lib, shape=(320, 400), dark_e_s=0.02, glow_e_s=0.5, cut_short=1, master=True)
+    r = darks.run_darks(lib, "Central 50 %")
+    m = r.main
+    check(f"dark current {darks.rate_text(m.measured)} e⁻/px/s", abs(m.measured / t["dark_e_s"] - 1) < 0.05,
+          f"true {t['dark_e_s']}")
+    check(f"read noise from the darks' noise {r.read_noise_e:.2f} e⁻", abs(r.read_noise_e - t["read_noise"]) < 0.08,
+          f"true {t['read_noise']}")
+    check(f"hot pixels found ({m.hot_count}) and edge glow seen ({m.glow_where})",
+          m.hot_count > 0 and m.glow_seen(max(t["exposures"])))
+    why = [w for _n, w in r.left_out]
+    check("a frame cut short and a master dark are left out",
+          any(w.startswith("cut short") for w in why) and any("master" in w for w in why))
+    cold = os.path.join(TMP, "darks_cold")
+    synth_dark.make_darks(cold, shape=(320, 400), dark_e_s=0.0, exposures=(30.0, 120.0), hot_fraction=0.0)
+    rc = darks.run_darks(cold, "Central 50 %")
+    check(f"no dark current gives an upper limit (at most {darks.rate_text(rc.main.rate)})",
+          rc.main.upper_limit and 0 < rc.main.rate < 0.002)
+    doc = darks.apply_to_profile(r, None, "selftest")
+    check("dark result makes a valid camera profile", sp.validate(doc) == [], "; ".join(sp.validate(doc)[:2]))
+    fig = Figure(figsize=(9, 6))
+    dark_plots.draw(fig, r)
+    fig.savefig(os.path.join(TMP, "darks.png"))
+    check("dark plots draw", os.path.getsize(os.path.join(TMP, "darks.png")) > 10000)
+    specs = spec_editor.list_specs()
+    builtin = [d for _lab, _p, d in specs]
+    check(f"built-in spec files read and pass their check ({len(builtin)})",
+          bool(builtin) and all(spec_editor.check_spec(d) == [] for d in builtin))
+    fig = Figure(figsize=(9, 6))
+    spec_plots.draw(fig, builtin[0], spec_plots.gather(builtin[0], None, None, r))
+    fig.savefig(os.path.join(TMP, "spec.png"))
+    check("measured-against-spec plots draw", os.path.getsize(os.path.join(TMP, "spec.png")) > 10000)
+
+
 def s4_history():
     import history
     key = history.record_run("check", "selftest", {"ok": True}, app="selftest")
@@ -226,6 +269,7 @@ def main() -> int:
     section("2  Shared profile code and the format-v1 examples", s2_profiles)
     section("3  Reading frames and Check image (synthetic frames)", s3_check)
     section("3b The bench run (synthetic flat-pair ladders)", s3b_bench)
+    section("3c The dark run and the spec curves (synthetic darks)", s3c_darks)
     section("4  Run history", s4_history)
     section("5  The window", s5_window)
     section("6  Your SHOBS data folder (read only)", s6_data_folder)
