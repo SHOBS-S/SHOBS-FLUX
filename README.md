@@ -9,23 +9,31 @@ own system's numbers instead of guesses.
 > **Work in progress.** SHOBS-FLUX is being built in six milestones (0.1 to 0.6). There is no release yet: 1.0.0
 > comes when version 1 is complete and working well.
 
-## What works now (0.1)
+## What works now (0.2)
 
 - **Check image.** Open any FITS or XISF frame. FLUX reports the sky in electrons per pixel (and per second) for each
   color, whether the exposure is sky- or read-noise-limited, saturated pixels, stars over the linear limit or
   saturated, each star's light in electrons, SNR and FWHM (or the size of a defocused "donut"), and the exposure at
   which the brightest star would reach the linear limit. Click a star for its numbers. Every number says where it
-  came from: **measured**, **header**, **spec**, **estimate**, **user** (typed by you) or **worked out**.
+  came from: **measured**, **header**, **spec**, **estimate**, **user** (typed by you) or **worked out**. Stacked or
+  stretched (processed) images are recognised and judged on their stars only.
+- **Camera (bench run).** Point FLUX at a folder of flat pairs (two flats at each of 10–20 exposures, very short to
+  past saturation) and bias pairs (here or in a folder of their own). In a central region, per color for
+  one-shot-color cameras, it measures the **gain** (photon transfer curve), **read noise** and **bias level**, **full
+  well** and **saturation**, the **linearity curve** and the **safe linear limit**, and the camera's
+  **exposure-timing offset**; it checks that the panel stayed steady and that the bias frames saw no light. The
+  photon transfer and linearity curves are drawn, every pair is listed, and **Save to camera profile** writes the
+  measured values (showing what changes first; values you typed can be kept). **Shooting plan** prints a ladder
+  for your panel from one test flat or from a finished run.
 - **Profiles.** The camera and system profiles in your SHOBS data folder, value by value with its source. Save a
   starting camera profile from a frame, type your own values (a linear limit, say); every save keeps the previous
   revision.
-- **Run history.** Every check is recorded in a small database for the History page to come.
+- **History.** Every check and bench run is recorded, with its worst finding in a few words.
 
 ## Coming
 
 | Milestone | What |
 | --- | --- |
-| 0.2 | Bench photon transfer curve: gain, read noise, full well, linearity, timing offset, per color |
 | 0.3 | Dark current; manufacturer's spec curves drawn under the measured points |
 | 0.4 | On-sky: zero point per band, extinction, seeing, sky brightness, scintillation (from SHOBS-P's on-sky log) |
 | 0.5 | History and trend plots, CSV and PNG export, profile roll-back |
