@@ -67,6 +67,7 @@ MIN_STARS = 2                 # catalogued stars a night needs for a zero point
 MIN_FRAMES = 10               # frames a night needs
 BIN_DAYS = 10.0 / 1440.0      # 10-minute bins for the photometric test
 PHOT_BIN_RMS = 0.025          # binned residual rms (mag) a photometric night stays within
+PHOT_BIN_RANGE = 0.05         # and the lowest to the highest 10-minute bin (mag): haze coming or going
 K_MIN_SPAN = 0.25             # airmass span a night needs to measure extinction
 K_RANGE = (0.0, 1.0)          # a physical extinction coefficient
 DEFOCUS_ARCSEC = 7.0          # a night's median FWHM above this is defocused
@@ -153,6 +154,7 @@ class NightResult:
     k_used_source: str = ""                            # "this night" / "profile" / "typical" / "all nights"
     rms: float = float("nan")                          # per-frame residual rms
     bin_rms: float = float("nan")                      # 10-minute binned residual rms
+    bin_range: float = float("nan")                    # lowest to highest 10-minute bin
     photometric: bool = False
     fwhm_arcsec: float = float("nan")
     fwhm_sigma: float = float("nan")
@@ -403,20 +405,21 @@ def linfit(x, y, nsig: float = 3.0, iters: int = 5):
     return res
 
 
-def binned_rms(jd, resid, width: float = BIN_DAYS) -> tuple[float, int]:
-    """rms of the residuals averaged in bins of `width` days (bins with ≥ 3 points), and the number of bins."""
+def binned_rms(jd, resid, width: float = BIN_DAYS) -> tuple[float, int, float]:
+    """(rms of the residuals averaged in bins of `width` days (bins with ≥ 3 points), the number of bins, the range
+    from the lowest bin to the highest)."""
     jd = np.asarray(jd, dtype=float)
     r = np.asarray(resid, dtype=float)
     ok = np.isfinite(jd) & np.isfinite(r)
     if ok.sum() < 3:
-        return float("nan"), 0
+        return float("nan"), 0, float("nan")
     jd, r = jd[ok], r[ok]
     b = np.floor((jd - jd.min()) / width).astype(int)
     means = [float(np.mean(r[b == i])) for i in np.unique(b) if (b == i).sum() >= 3]
     if len(means) < 2:
-        return float(np.std(r) / math.sqrt(max(len(r), 1))), len(means)
+        return float(np.std(r) / math.sqrt(max(len(r), 1))), len(means), 0.0
     m = np.asarray(means)
-    return float(np.sqrt(np.mean((m - np.mean(m)) ** 2))), len(means)
+    return float(np.sqrt(np.mean((m - np.mean(m)) ** 2))), len(means), float(m.max() - m.min())
 
 
 def moon_illumination(jd: float) -> float:
@@ -553,10 +556,11 @@ def analyse(ds: Dataset, k_prior: tuple | None = None, aperture_mm: float | None
     k_ok = False
     if res.x_span >= K_MIN_SPAN and K_RANGE[0] <= k_fit <= K_RANGE[1] and k_fit_s < 0.1:
         resid = zf - (a + b * (x - 1.0))
-        bin_rms, nbins = binned_rms(ds.jd[keep], resid[keep])
-        k_ok = bool(math.isfinite(bin_rms) and bin_rms <= PHOT_BIN_RMS and keep.mean() >= 0.8)
+        bin_rms, nbins, bin_range = binned_rms(ds.jd[keep], resid[keep])
+        k_ok = bool(math.isfinite(bin_rms) and bin_rms <= PHOT_BIN_RMS and bin_range <= PHOT_BIN_RANGE
+                    and keep.mean() >= 0.8)
     if k_ok:
-        res.rms, res.bin_rms = rms, bin_rms
+        res.rms, res.bin_rms, res.bin_range = rms, bin_rms, bin_range
         res.photometric = True
         res.k, res.k_sigma = k_fit, k_fit_s
         res.k_used, res.k_used_source = k_fit, "this night"
@@ -577,8 +581,9 @@ def analyse(ds: Dataset, k_prior: tuple | None = None, aperture_mm: float | None
             L.append(("info", f"The zero point steps {step_mag:+.3f} mag at the meridian flip (the other pier side: "
                               "flats or vignetting differ); the two sides are judged each about its own level."))
         res.rms = float(np.sqrt(np.mean(r[keep] ** 2)))
-        res.bin_rms, nbins = binned_rms(ds.jd[keep], r[keep])
+        res.bin_rms, nbins, res.bin_range = binned_rms(ds.jd[keep], r[keep])
         res.photometric = bool(math.isfinite(res.bin_rms) and res.bin_rms <= PHOT_BIN_RMS
+                               and res.bin_range <= PHOT_BIN_RANGE
                                and keep.sum() >= MIN_FRAMES and keep.sum() >= 0.8 * ok.sum())
         res.x_mean = float(np.mean(x[keep]))
         res.zp_mean = float(np.mean(zf[keep]))
@@ -589,10 +594,12 @@ def analyse(ds: Dataset, k_prior: tuple | None = None, aperture_mm: float | None
 
     # findings
     L.append(("ok" if res.photometric else "warn",
-              (f"✔ Photometric: the zero point held within {res.bin_rms:.3f} mag (10-minute bins, {nbins} bins)."
+              (f"✔ Photometric: the zero point held within {res.bin_range:.3f} mag across {nbins} 10-minute bins "
+               f"(rms {res.bin_rms:.3f})."
                if res.photometric else
-               f"⚠ Not photometric: the zero point moved {res.bin_rms:.3f} mag between 10-minute bins (limit "
-               f"{PHOT_BIN_RMS}); clouds or haze. Kept out of the zero point and extinction.")))
+               f"⚠ Not photometric: the zero point moved {res.bin_range:.3f} mag across the night in 10-minute bins "
+               f"(rms {res.bin_rms:.3f}; limits {PHOT_BIN_RANGE} and {PHOT_BIN_RMS}): clouds or haze. Kept out of "
+               "the zero point and extinction; seeing, sky, scintillation and cadence still count.")))
     if k_ok:
         L.append(("ok", f"✔ Extinction measured: k = {k_fit:.3f} ± {k_fit_s:.3f} mag/airmass over airmass "
                         f"{np.nanmin(x[keep]):.2f}–{np.nanmax(x[keep]):.2f}."))
