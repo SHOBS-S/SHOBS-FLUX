@@ -129,6 +129,57 @@ class TestDarks(TempData):
         self.assertLess(abs(r.doubling_c - 5.0), 0.6, r.doubling_c)
         self.assertTrue(any("doubles every" in x for _, x in r.lines))
 
+    def test_no_temperature_in_headers_is_one_group(self):
+        folder, _ = self.lib(temp_keys="none", dark_e_s=0.03)
+        r = darks.run_darks(folder, REGION)
+        self.assertEqual(len(r.temps), 1)
+        self.assertEqual(r.main.n_darks, 16)
+        self.assertLess(abs(r.main.measured / 0.03 - 1), 0.05)
+        doc = darks.apply_to_profile(r, None, "test")
+        self.assertEqual(len(doc["dark"]["by_temp"]), 1)
+        self.assertIsNone(doc["dark"]["by_temp"][0]["temp_c"])
+
+    def test_sensor_temperature_only_is_not_split(self):
+        # a steady −11 °C with ±0.4 °C of scatter straddles the old fixed bins at −12 / −10
+        folder, _ = self.lib(temp_keys="sensor", temp=-11.0, temp_jitter=0.4)
+        r = darks.run_darks(folder, REGION)
+        self.assertEqual(list(r.temps), [-11.0])
+        self.assertFalse(math.isfinite(r.doubling_c))
+
+    def test_main_temperature_is_one_that_was_measured(self):
+        base = self.path("lib3")
+        synth_dark.make_darks(os.path.join(base, "a"), temp=-10.0, exposures=(60.0,), per_exposure=10,
+                              bias_in=None, seed=3)
+        synth_dark.make_darks(os.path.join(base, "b"), temp=0.0, exposures=(30.0, 120.0), per_exposure=3,
+                              bias_in=None, seed=4)
+        r = darks.run_darks(base, REGION)
+        self.assertEqual(r.main_temp, 0.0)
+        self.assertTrue(any(x.startswith("No dark current at -10") for _, x in r.lines))
+        self.assertNotIn("nan", " ".join(x for _, x in r.lines))
+
+    def test_dark_at_temp_uses_the_nearest_measurement(self):
+        prof = {"dark": {"by_temp": [{"temp_c": -10.0, "value": 0.02, "sigma": 0.001},
+                                     {"temp_c": 0.0, "value": 0.08, "sigma": 0.002}]}}
+        rec = instrument.dark_at_temp(prof, None, 0.4)
+        self.assertEqual(rec["value"], 0.08)
+        self.assertEqual(rec["source"], "measured")
+        rec = instrument.dark_at_temp(prof, None, -5.0)
+        self.assertEqual(rec["source"], "derived")
+        self.assertAlmostEqual(rec["value"], 0.04, delta=0.002)
+        close = {"dark": {"by_temp": [{"temp_c": -12.0, "value": 0.02}, {"temp_c": -10.0, "value": 0.02}]}}
+        rec = instrument.dark_at_temp(close, None, 10.0)          # 2 °C apart: no flat line carried on to +10 °C
+        self.assertGreater(rec["value"], 0.2)
+
+    def test_damaged_profile_does_not_stop_the_run(self):
+        folder, _ = self.lib(dark_e_s=0.05)
+        r = darks.run_darks(folder, REGION)
+        doc = darks.apply_to_profile(r, None, "test")
+        doc["per_channel"] = "broken"
+        doc["values"]["gain_e_per_adu"] = sp.record(0.25, "e-/ADU", "measured")
+        sp.save_profile(doc, "test")
+        r2 = darks.run_darks(folder, REGION)
+        self.assertLess(abs(r2.main.measured / 0.05 - 1), 0.05)
+
     def test_profile_and_reading_it_back(self):
         folder, t = self.lib(dark_e_s=0.02)
         r = darks.run_darks(folder, REGION)

@@ -391,6 +391,13 @@ class SpecDialog(tk.Toplevel):
             return
         builtin = self.path and os.path.normcase(os.path.dirname(os.path.abspath(self.path))) == \
             os.path.normcase(os.path.abspath(builtin_dir()))
+        target = sp.profile_path("specs", doc["spec_id"], make=False)
+        mine = self.path and os.path.normcase(os.path.abspath(self.path)) == os.path.normcase(os.path.abspath(target))
+        if os.path.exists(target) and not mine and not self.app.testing:
+            if not messagebox.askyesno("Spec curves", f"You already have a spec file for “{doc.get('model')}” "
+                                       f"({os.path.basename(target)}). Replace it? (The old one is kept in the "
+                                       "history folder.)", parent=self):
+                return
         doc["edited"] = sp.now_iso()[:10]
         doc["edited_by"] = settings.WRITTEN_BY
         try:

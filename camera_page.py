@@ -317,9 +317,14 @@ class CameraPage:
         self._say("")
         self.run_btn.configure(state="disabled")
         self.save_btn.configure(state="disabled")
+        self.measure.configure(state="disabled")         # the run on its way decides what the page shows
+
+    def _idle(self):
+        self.run_btn.configure(state="normal")
+        self.measure.configure(state="readonly")
 
     def _failed(self, what: str, exc):
-        self.run_btn.configure(state="normal")
+        self._idle()
         self.save_btn.configure(state="normal" if self.current is not None else "disabled")
         known = (bench.BenchError, darks.DarkError, frames.FrameError)
         why = str(exc) if isinstance(exc, known) else f"{type(exc).__name__}: {exc}"
@@ -329,7 +334,7 @@ class CameraPage:
     def done(self, res, exc):
         if exc is not None:
             return self._failed("bench run", exc)
-        self.run_btn.configure(state="normal")
+        self._idle()
         self.res = res
         pid = self.camera_id(res)
         self.run_keys["bench"] = history.record_run(
@@ -345,7 +350,7 @@ class CameraPage:
     def done_darks(self, res, exc):
         if exc is not None:
             return self._failed("dark run", exc)
-        self.run_btn.configure(state="normal")
+        self._idle()
         self.dres = res
         pid = self.camera_id(res)
         n = res.n_bias + sum(tr.n_darks for tr in res.temps.values())
@@ -623,13 +628,13 @@ class CameraPage:
         if not changes:
             self._say("⚠ This run measured nothing that goes in the profile.")
             return
-        SaveDialog(self, pid, old, changes, name, upper=self.kind == "dark" and res.main is not None
-                   and res.main.upper_limit)
+        dlg = SaveDialog(self, pid, old, changes, name, upper=self.kind == "dark" and res.main is not None
+                         and res.main.upper_limit)
+        dlg.what = (res, mod, self.run_key)              # the run on screen now, whatever is showing at OK
 
-    def do_save(self, pid: str, old: dict | None, keep_user: bool, name: str | None):
-        res = self.current
-        mod = darks if self.kind == "dark" else bench
-        doc = mod.apply_to_profile(res, old, settings.WRITTEN_BY, run_key=self.run_key, keep_user=keep_user,
+    def do_save(self, pid: str, old: dict | None, keep_user: bool, name: str | None, what=None):
+        res, mod, run_key = what or (self.current, darks if self.kind == "dark" else bench, self.run_key)
+        doc = mod.apply_to_profile(res, old, settings.WRITTEN_BY, run_key=run_key, keep_user=keep_user,
                                    instrume_fallback=name)
         doc["profile_id"] = pid
         try:
@@ -637,7 +642,7 @@ class CameraPage:
         except (sp.ProfileError, OSError) as exc:
             self._say(f"✖ The profile could not be saved ({exc}).")
             return
-        settings.log(f"{'dark' if mod is darks else 'bench'} run {self.run_key} saved to {path}")
+        settings.log(f"{'dark' if mod is darks else 'bench'} run {run_key} saved to {path}")
         self._say(f"✔ Saved to camera profile {pid}" + (" (the previous revision is in the history folder)."
                                                          if old else "."))
         self.app.set_status(f"✔ Camera profile {pid} saved.")
@@ -712,7 +717,7 @@ class SaveDialog(tk.Toplevel):
     def ok(self):
         keep = bool(self.keep.get())
         self.destroy()
-        self.page.do_save(self.pid, self.old, keep, self.name)
+        self.page.do_save(self.pid, self.old, keep, self.name, getattr(self, "what", None))
 
 
 class PlanDialog(tk.Toplevel):

@@ -176,15 +176,25 @@ def dark_at_temp(profile: dict | None, spec: dict | None, temp_c: float) -> dict
            and sp._finite(p.get("value")) is not None and float(p["value"]) > 0]
     if not pts:
         return None
-    if min(abs(float(p["temp_c"]) - temp_c) for p in pts) <= 1.0:
-        return None
+    near = min(pts, key=lambda p: abs(float(p["temp_c"]) - temp_c))
+    if abs(float(near["temp_c"]) - temp_c) <= 1.0:
+        # measured at (about) this temperature: that measurement, whichever temperature the profile's headline is
+        ul = bool(near.get("upper_limit"))
+        return sp.record(float(near["value"]), "e-/px/s", "measured",
+                         sigma=None if ul else sp._finite(near.get("sigma")), date=block.get("date"),
+                         conditions=f"{float(near['temp_c']):g} °C", run=block.get("run"),
+                         note=("at most (2σ upper limit); " if ul else "") +
+                         f"measured at {float(near['temp_c']):g} °C")
     firm = [p for p in pts if not p.get("upper_limit")]
+    temps = [float(p["temp_c"]) for p in firm]
     at_most = False
-    if len(firm) >= 2:
+    if len(firm) >= 2 and max(temps) - min(temps) >= 4.0:
         v = dark_from_curve([[p["temp_c"], p["value"]] for p in firm], temp_c)
-        how = "measured at " + " and ".join(f"{float(p['temp_c']):g}" for p in firm) + " °C"
+        outside = temp_c < min(temps) or temp_c > max(temps)
+        how = ("measured at " + " and ".join(f"{t:g}" for t in sorted(temps)) + " °C" +
+               (", carried on past them" if outside else ""))
     else:
-        p0 = min(pts, key=lambda p: abs(float(p["temp_c"]) - temp_c))
+        p0 = near
         t0, d0 = float(p0["temp_c"]), float(p0["value"])
         at_most = bool(p0.get("upper_limit"))
         curve = ((spec or {}).get("dark_current_curve") or {}).get("points")

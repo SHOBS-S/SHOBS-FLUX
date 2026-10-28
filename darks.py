@@ -46,6 +46,8 @@ SIGNIFICANT = 2.0             # a dark current below this many sigma is an upper
 HOT_SIGMA = 10.0              # hot pixel: this many stack-noise sigmas above the region's level
 GLOW_MIN_E = 2.0              # edge glow worth a line: this many electrons above the centre over the exposure
 BIN = 8                       # whole frames are shrunk by this before the glow map (hot pixels then median out)
+MIN_SPAN_C = 4.0              # temperatures this far apart or more before a doubling is worked out from them
+NO_TEMP = float("nan")        # the one key for darks with no temperature in their header (one object: NaN ≠ NaN)
 
 
 class DarkError(Exception):
@@ -132,7 +134,11 @@ def _is_master(h: dict, path: str) -> str | None:
         return "a master (stacked) frame"
     for k in fr.STACK_KEYS:
         v = h.get(k)
-        if v not in (None, False, 0, 1, "1", "") and not (isinstance(v, str) and not v.strip()):
+        if isinstance(v, bool):
+            if v:
+                return f"a stacked frame ({k})"
+            continue
+        if v not in (None, 0, 1, "1", "") and not (isinstance(v, str) and not v.strip()):
             return f"a stacked frame ({k} {v})"
     try:
         if int(h.get("BITPIX", 16)) < 0:
@@ -293,22 +299,33 @@ def scan_darks(folder: str, bias_folder: str | None = None, step=None, max_per_e
 
     # temperature groups: SET-TEMP when the camera writes it, else the sensor temperature in 2 °C bins
     groups: dict = {}
+    loose = []                                       # sensor temperature only: grouped by gaps below
     for f in darks:
         if f.set_temp is not None:
             if f.temp is not None and abs(f.temp - f.set_temp) > SETTLE_C:
                 sc.left_out.append((f.name, f"shot at {f.temp:.1f} °C, not its set {f.set_temp:g} °C (the cooler "
                                             "had not settled)"))
                 continue
-            g = float(round(f.set_temp))
+            groups.setdefault(float(round(f.set_temp)), []).append(f)
         elif f.temp is not None:
-            g = float(round(f.temp / TEMP_GROUP_C) * TEMP_GROUP_C)
+            loose.append(f)
         else:
-            g = float("nan")
-        groups.setdefault(g, []).append(f)
+            groups.setdefault(NO_TEMP, []).append(f)
+    # darks with only a sensor temperature: one group per run of temperatures with no gap wider than TEMP_GROUP_C
+    # (fixed 2 °C bins would split a steady −11 °C between −12 and −10), named by its median
+    loose.sort(key=lambda f: f.temp)
+    run: list = []
+    for f in loose + [None]:
+        if run and (f is None or f.temp - run[-1].temp > TEMP_GROUP_C):
+            g = float(round(float(np.median([x.temp for x in run]))))
+            groups.setdefault(g, []).extend(run)
+            run = []
+        if f is not None:
+            run.append(f)
     if not groups:
         sc.problems.append("every dark was shot before the cooler settled")
         return sc
-    nan_keys = [k for k in groups if math.isnan(k)]
+    nan_keys = [k for k in groups if k is NO_TEMP]
     if nan_keys and len(groups) > len(nan_keys):
         for k in nan_keys:
             for f in groups.pop(k):
@@ -486,9 +503,13 @@ def _gain_for(setup: dict, chans) -> tuple[dict, str, float]:
     prof = sp.find_camera_profile(setup.get("camera_id") or "")
     if prof:
         for c in chans:
-            v, rec = sp.camera_value(prof, "gain_e_per_adu", c if c != "L" else None)
-            if v and rec and rec.get("source") in ("measured", "user") and 0 < v < 100:
-                per[c] = float(v)
+            try:
+                v, rec = sp.camera_value(prof, "gain_e_per_adu", c if c != "L" else None)
+                v = sp._finite(v)
+                if v and isinstance(rec, dict) and rec.get("source") in ("measured", "user") and 0 < v < 100:
+                    per[c] = float(v)
+            except (AttributeError, TypeError, ValueError):   # a damaged profile: the camera-wide gain stands
+                continue
     return per, src, float(g)
 
 
@@ -534,6 +555,7 @@ def run_darks(folder: str, region_name: str = bench.DEFAULT_REGION, step=None, s
     if sc.biases:
         lv = {c: [] for c in chans}
         vs = {c: [] for c in chans}
+        npx = {c: 0 for c in chans}
         arrs = []
         prev = None
         for f in sc.biases:
@@ -548,8 +570,9 @@ def run_darks(folder: str, region_name: str = bench.DEFAULT_REGION, step=None, s
             if prev is not None:
                 pb = bench.channel_planes(prev, sc.bayer)
                 for c in chans:
-                    _, sd, _ = bench.clipped_stats(pa[c] - pb[c])
+                    _, sd, nn = bench.clipped_stats(pa[c] - pb[c])
                     vs[c].append(sd * sd / 2.0 - q)
+                    npx[c] = nn
                 prev = None
             else:
                 prev = a
@@ -562,7 +585,7 @@ def run_darks(folder: str, region_name: str = bench.DEFAULT_REGION, step=None, s
                 res.bias_se[c] = float(np.std(lv[c], ddof=1) / math.sqrt(n)) if n > 1 else float("nan")
                 if vs[c]:
                     res.bias_var[c] = float(np.median(vs[c]))
-                    npix = max(1, arrs[0].size // len(chans))
+                    npix = max(2, npx[c])
                     res.bias_var_se[c] = (res.bias_var[c] + q) * math.sqrt(2.0 / npix) / math.sqrt(len(vs[c]))
             bias_stack = np.median(np.stack(arrs), axis=0) if len(arrs) >= 3 else (arrs[0] if arrs else None)
             dates = sorted(str(f.header.get("DATE-OBS") or "")[:10] for f in sc.biases if f.header.get("DATE-OBS"))
@@ -590,9 +613,10 @@ def run_darks(folder: str, region_name: str = bench.DEFAULT_REGION, step=None, s
     # the main temperature: the most darks (ties: the profile's set temperature)
     if res.temps:
         set_t = sc.setup.get("set_temp_c")
-        res.main_temp = max(res.temps, key=lambda g: (res.temps[g].n_darks,
-                                                      -abs(g - set_t) if set_t is not None and not math.isnan(g)
-                                                      else 0))
+        measured = [g for g, tr in res.temps.items() if math.isfinite(tr.rate)] or list(res.temps)
+        res.main_temp = max(measured, key=lambda g: (res.temps[g].n_darks,
+                                                     -abs(g - set_t) if set_t is not None and g is not NO_TEMP
+                                                     else 0))
     if res.main is not None:
         rn = [ch.read_noise_e for ch in res.main.channels.values() if math.isfinite(ch.read_noise_e)]
         res.read_noise_e = float(np.median(rn)) if rn else float("nan")
@@ -816,7 +840,8 @@ def _glow(res: DarkResult, sc: DarkScan, tr: TempResult, step) -> None:
     by, bx = max(1, h // nb), max(1, w // nb)
     blocks = np.array([[np.median(diff[i * by:(i + 1) * by, j * bx:(j + 1) * bx]) for j in range(nb)]
                        for i in range(nb)])
-    centre = float(np.median(blocks[nb // 2 - 2:nb // 2 + 2, nb // 2 - 2:nb // 2 + 2]))
+    hw = max(1, nb // 8)
+    centre = float(np.median(blocks[nb // 2 - hw:nb // 2 + hw, nb // 2 - hw:nb // 2 + hw]))
     rate = (blocks - centre) * res.gain / dt
     tr.glow_map = rate
     tr.glow_ref = ref_word
@@ -834,16 +859,17 @@ def _glow(res: DarkResult, sc: DarkScan, tr: TempResult, step) -> None:
 def _doubling(res: DarkResult) -> None:
     """Two or more temperatures with a significant dark current: how many °C double it (log-linear fit)."""
     pts = [(g, tr.measured, tr.sigma) for g, tr in res.temps.items()
-           if not math.isnan(g) and tr.significant and math.isfinite(tr.measured) and tr.measured > 0]
-    if len(pts) < 2:
+           if g is not NO_TEMP and tr.significant and math.isfinite(tr.measured) and tr.measured > 0]
+    if len(pts) < 2 or max(p[0] for p in pts) - min(p[0] for p in pts) < MIN_SPAN_C:
         return
     t = np.array([p[0] for p in pts])
     y = np.log2(np.array([p[1] for p in pts]))
     sy = np.array([p[2] / (p[1] * math.log(2)) for p in pts])
     a, b, cov, _ = bench._wls(t, y, 1.0 / np.maximum(sy, 1e-6) ** 2)
     if b > 0 and math.isfinite(b):
-        res.doubling_c = 1.0 / b
-        res.doubling_sigma = math.sqrt(cov[1, 1]) / (b * b)
+        c, sc_ = 1.0 / b, math.sqrt(cov[1, 1]) / (b * b)
+        if sc_ < 0.5 * c:                            # a doubling known no better than ±50 % says nothing
+            res.doubling_c, res.doubling_sigma = c, sc_
 
 
 # ---- findings ------------------------------------------------------------------------------------------------------
@@ -876,6 +902,10 @@ def _findings(res: DarkResult, sc: DarkScan) -> None:
     for g in sorted(res.temps, key=lambda x: (x != res.main_temp, x)):
         tr = res.temps[g]
         if not tr.channels:
+            continue
+        if not math.isfinite(tr.rate):
+            res.add("info", f"No dark current at {_t_word(g)}: its {tr.n_darks} darks are all one exposure and there "
+                            "are no bias frames to measure them against.")
             continue
         where = f" at {_t_word(g)}" if len(res.temps) > 1 or not math.isnan(g) else ""
         exps = ", ".join(_exp(s.exptime) for s in tr.exposures)
@@ -1065,6 +1095,8 @@ def measured_records(res: DarkResult, run_key: str | None = None) -> tuple[dict,
 
 def changes_for(res: DarkResult, doc: dict | None) -> list[tuple[str, object, str, object]]:
     vals, _, block = measured_records(res)
+    if not vals:
+        return []                                    # hot pixels or glow alone must not replace a measured block
     out = []
     for k, r in vals.items():
         old = ((doc or {}).get("values") or {}).get(k) or {}

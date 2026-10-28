@@ -50,11 +50,13 @@ def make_darks(folder: str, shape=(240, 320), gain=0.25, read_noise=1.4, bias=50
                exposures=(10.0, 30.0, 60.0, 120.0), per_exposure=4, bias_frames=6, bayer: str | None = "RGGB",
                temp=-10.0, hot_fraction=0.0005, hot_rate=2.0, glow_e_s=0.0, leak: dict | None = None,
                session_drift_adu=0.0, subfolders=True, bias_in="Bias", cut_short: int = 0, master=False,
-               unsettled: int = 0, seed=11, instrume="Synthetic Bench Cam", egain: bool = True) -> dict:
+               unsettled: int = 0, seed=11, instrume="Synthetic Bench Cam", egain: bool = True, temp_keys: str = "both",
+               temp_jitter: float = 0.0) -> dict:
     """Write a dark library into folder. subfolders=True: each exposure in '<t> Sec', bias frames in bias_in (None:
     no bias frames). session_drift_adu: the bias level moves by this much from one exposure's session to the next
     (darks shot on different days). cut_short: that many frames of the longest exposure are written half way, like
-    a copy that stopped. egain: write the gain as EGAIN (as ZWO cameras do). master: a stacked 32-bit master dark is left in the longest exposure's folder. unsettled:
+    a copy that stopped. temp_keys: 'both' (CCD-TEMP and SET-TEMP), 'sensor' (CCD-TEMP only, with temp_jitter °C
+    of scatter) or 'none'. egain: write the gain as EGAIN (as ZWO cameras do). master: a stacked 32-bit master dark is left in the longest exposure's folder. unsettled:
     that many darks of the shortest exposure were shot with the sensor 4 °C warm. Returns what went in."""
     os.makedirs(folder, exist_ok=True)
     rng = np.random.default_rng(seed)
@@ -75,8 +77,12 @@ def make_darks(folder: str, shape=(240, 320), gain=0.25, read_noise=1.4, bias=50
         tt = f"{t * 1000:.1f}ms" if t < 1 else f"{t:.1f}s"
         name = f"{word}_{tt}_Bin1_CV_20261026-{90000 + k:06d}_0deg_{i:04d}.fit"
         hdr = synth_bench.header(kind, t, bayer, n=k, instrume=instrume)
-        hdr["CCD-TEMP"] = temp_now
+        hdr["CCD-TEMP"] = temp_now + (float(rng.uniform(-temp_jitter, temp_jitter)) if temp_jitter else 0.0)
         hdr["SET-TEMP"] = temp
+        if temp_keys != "both":
+            hdr.pop("SET-TEMP", None)
+        if temp_keys == "none":
+            hdr.pop("CCD-TEMP", None)
         if egain:
             hdr["EGAIN"] = gain
         hdr["DATE-OBS"] = f"2026-10-{10 + (k // 40):02d}T12:{(k // 60) % 60:02d}:{k % 60:02d}.000"

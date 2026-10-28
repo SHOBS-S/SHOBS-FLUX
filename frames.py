@@ -217,6 +217,10 @@ def _xisf_raw(path: str, header_only: bool = False):
         geometry = [int(v) for v in (image.get("geometry") or "0:0:1").split(":")]
         width, height = geometry[0], geometry[1]
         channels = geometry[2] if len(geometry) > 2 else 1
+        if width and height:                     # an XISF without FITS keywords still says its size
+            header.setdefault("NAXIS", 2 if channels == 1 else 3)
+            header.setdefault("NAXIS1", width)
+            header.setdefault("NAXIS2", height)
         if header_only:
             return None, header
         fmt = image.get("sampleFormat") or "UInt16"
