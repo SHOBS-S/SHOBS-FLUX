@@ -9,7 +9,7 @@ own system's numbers instead of guesses.
 > **Work in progress.** SHOBS-FLUX is being built in six milestones (0.1 to 0.6). There is no release yet: 1.0.0
 > comes when version 1 is complete and working well.
 
-## What works now (0.3)
+## What works now (0.4)
 
 - **Check image.** Open any FITS or XISF frame. FLUX reports the sky in electrons per pixel (and per second) for each
   color, whether the exposure is sky- or read-noise-limited, saturated pixels, stars over the linear limit or
@@ -37,16 +37,33 @@ own system's numbers instead of guesses.
   change is saved as your own copy.
 - **Save to camera profile** writes a run's measured values (showing what changes first; values you typed can be
   kept). The Check image page reads a measured dark current at the frame's own temperature.
+- **Sky: on-sky runs.** FLUX learns what your telescope, camera and sky do from ordinary nights. Two sources:
+  **SHOBS-P's on-sky logs** (SHOBS-P 2.2.19.1 and later writes one after every reduction, so every night you reduce
+  counts) or **a folder of lights** (one night's lights of a field with catalogued stars: FLUX measures them itself and
+  writes the same kind of log). Pick the **setup** (camera setting and focal length) when the logs hold more than one,
+  type the telescope's name, aperture and site elevation (aperture and elevation are for scintillation; the site is
+  never stored in a profile), and Run. For each band it measures the **zero point** at airmass 1 (against APASS DR9 and
+  Gaia DR3 magnitudes of every catalogued field star; saturated stars, stars whose catalog value disagrees with the
+  rest and stars that vary are left out, each with the reason), the **extinction**, the **seeing** in focus and per
+  defocus, the **sky brightness** (dark-Moon nights first), **scintillation** (Young's C_Y) and the **time between
+  frames**.
+- **How nights are judged.** A night is **photometric** when its zero point holds steady in 10-minute bins (thin
+  cloud or haze moves it); only photometric nights set the zero point and the extinction, each night once, and a night
+  that disagrees with the others is set aside, not averaged in. Seeing, sky, scintillation and cadence count from
+  every usable night. A re-run of a night in SHOBS-P replaces the earlier one (it is listed in grey, not counted); a log
+  that cannot be read is listed with ✖ and why. Pick a night in the list for its findings and pictures: its zero point
+  against airmass and through the night, and every night's zero point and seeing.
+- **Save to system profile** writes the nights' values into the system profile for that telescope and camera
+  (showing what changes first; values you typed can be kept). Every night FLUX uses goes into the run history once.
 - **Profiles.** The camera and system profiles in your SHOBS data folder, value by value with its source. Save a
   starting camera profile from a frame, type your own values (a linear limit, say); every save keeps the previous
   revision.
-- **History.** Every check, bench run and dark run is recorded, with its worst finding in a few words.
+- **History.** Every check, bench run, dark run and on-sky night is recorded, with its worst finding in a few words.
 
 ## Coming
 
 | Milestone | What |
 | --- | --- |
-| 0.4 | On-sky: zero point per band, extinction, seeing, sky brightness, scintillation (from SHOBS-P's on-sky log) |
 | 0.5 | History and trend plots, CSV and PNG export, profile roll-back |
 | 0.6 | SHOBS-P and SHOBS-SCHED read the profiles; release 1.0.0 |
 

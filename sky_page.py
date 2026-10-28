@@ -247,7 +247,7 @@ class SkyPage:
         cols = ("night", "target", "band", "frames", "from", "zp", "k", "phot", "seeing", "sky", "cy", "oh", "status")
         heads = (("Night", 86), ("Target", 110), ("Band", 44), ("Frames", 54), ("From", 64), ("Zero point", 76),
                  ("k", 92), ("Photometric", 82), ("Seeing ″", 110), ("Sky mag/″²", 80), ("C_Y", 46),
-                 ("Overhead s", 76), ("Status", 320))
+                 ("Between frames s", 108), ("Status", 320))
         self.tree = ttk.Treeview(tw, columns=cols, show="headings", selectmode="browse", height=6)
         for c, (head, w) in zip(cols, heads):
             self.tree.heading(c, text=head)
@@ -887,7 +887,7 @@ def night_row(r, s) -> tuple:
         see = "—"
     status = onsky.night_summary(r)["worst"]
     bs = s.bands.get(ds.band)
-    why = bs.zp_out.get(ds.night) if bs else None
+    why = (bs.zp_out.get(f"{ds.night} {ds.target}") or bs.zp_out.get(ds.night)) if bs else None
     if not status and why and r.photometric:
         status = f"⚠ set aside: {why}"
     return (ds.night, ds.target, ds.band, r.n_frames or len(ds.jd), _from(ds), _fmt(r.zp1, 3), k,
@@ -926,14 +926,13 @@ def run_lines(res: SkyRun) -> list:
         if math.isfinite(b.cy):
             parts.append(f"C_Y {b.cy:.2f}")
         out.append(("info", f"{w[0].upper() + w[1:]}: the profile would get " + "; ".join(parts) + "."))
-        for night, why in sorted(b.zp_out.items()):
+        for what, why in sorted(b.zp_out.items()):
             kind = "warn" if why.startswith("disagrees") else "info"
-            out.append((kind, ("⚠ " if kind == "warn" else "") + f"{night} set aside for the zero point: {why}."))
+            out.append((kind, ("⚠ " if kind == "warn" else "") + f"{what} set aside for the zero point: {why}."))
     if math.isfinite(s.overhead_s):
-        out.append(("info", f"Overhead per frame {s.overhead_s:.1f} s (exposures of {onsky.SHORT_EXPOSURE_S:g} s "
-                            "and longer)."))
-    if math.isfinite(s.overhead_short_s):
-        out.append(("info", f"Overhead per frame {s.overhead_short_s:.1f} s for shorter exposures."))
+        out.append(("info", f"Overhead per frame {s.overhead_s:.1f} s: the lowest of "
+                            f"{_plural(s.overhead_runs, 'run')} ({s.overhead_from}). A delay you set in the capture "
+                            "software only adds to it, so the quickest run is the camera's own."))
     out += list(s.lines)
     out.append(("info", "Pick a night in the list to see what it says."))
     return out

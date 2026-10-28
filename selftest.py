@@ -8,6 +8,7 @@ Sections:
   3 reading frames and Check image on synthetic frames with known camera values
   3b the bench run (photon transfer curve) on synthetic flat-pair ladders with known camera values
   3c the dark run (dark current, hot pixels, edge glow) on synthetic dark libraries, the spec curves and their plots
+  3d on-sky: zero point, extinction, scintillation and the judging of nights on synthetic on-sky logs
   4 the run history database
   5 the window (Check image on a frame, every page) — needs a display
   6 your SHOBS data folder: what is there (read only; reported, never a failure)
@@ -216,6 +217,54 @@ def s3c_darks():
     check("measured-against-spec plots draw", os.path.getsize(os.path.join(TMP, "spec.png")) > 10000)
 
 
+def s3d_onsky():
+    import onsky
+    import sky_plots
+    import synth_sky
+    import shobs_profile as sp
+    from matplotlib.figure import Figure
+    folder = os.path.join(TMP, "onsky_logs")
+    cam = synth_sky.camera_profile()
+    truth = None
+    for kw in (dict(night="2026-10-18", seed=1, cat_error={4: 1.4}, variable=7),
+               dict(night="2026-10-19", seed=2, airmass=(1.1, 1.9)),
+               dict(night="2026-10-20", seed=3, haze_mag=0.1)):
+        doc, t = synth_sky.make_log(n_frames=100, **kw)
+        truth = truth or t
+        if kw["night"] == "2026-10-20":                 # thin cloud passing in the middle of the night
+            n = len(doc["frames"])
+            for i, f in enumerate(doc["frames"]):
+                bump = 0.12 * math.exp(-0.5 * ((i - n / 2) / (n / 8)) ** 2)
+                for st in f["stars"].values():
+                    st["flux"] = round(st["flux"] * 10 ** (-0.4 * bump), 3)
+        synth_sky.write_log(doc, folder)
+    ds, bad = onsky.read_logs(onsky.log_files(folder), cam_lookup=lambda _cid: cam)
+    check("three synthetic on-sky logs read", len(ds) == 3 and not bad, "; ".join(w for _p, w in bad))
+    s = onsky.run_all(ds, None, truth["aperture_mm"], truth["elevation_m"])
+    b = s.bands.get("TG")
+    check(f"zero point {b.zp1:.3f}", abs(b.zp1 - truth["zp1"]) < 0.02, f"true {truth['zp1']}")
+    check(f"extinction k {b.k:.3f}", abs(b.k - truth["k"]) < 0.02, f"true {truth['k']}")
+    check(f"scintillation C_Y {b.cy:.2f}", abs(b.cy - truth["cy"]) < 0.35, f"true {truth['cy']}")
+    first = next(r for r in s.nights if r.ds.night == "2026-10-18")
+    check("the star with the wrong catalog value is left out", "Field 5" in first.stars_out
+          and "Field 5" not in first.stars_used)
+    hazy = next(r for r in s.nights if r.ds.night == "2026-10-20")
+    check("the hazy night is not photometric (and not in the zero point)",
+          not hazy.photometric and "2026-10-20" not in b.zp_nights)
+    pid = sp.system_id("14in RC", 2900, ds[0].camera_id)
+    doc = onsky.apply_to_profile(s, None, "selftest", "sky-selftest", system_id=pid, cam_id=ds[0].camera_id,
+                                 telescope={"name": "14in RC", "aperture_mm": 356, "focal_mm": 2900},
+                                 setup=ds[0].setup)
+    check("on-sky result makes a valid system profile", sp.validate(doc) == [], "; ".join(sp.validate(doc)[:2]))
+    sp.save_profile(doc, "selftest")
+    back = sp.find_system_profile(ds[0].camera_id, 2905)
+    check("system profile saved and found again", back is not None and back.get("profile_id") == pid)
+    fig = Figure(figsize=(9, 6))
+    sky_plots.draw(fig, s, None)
+    fig.savefig(os.path.join(TMP, "sky.png"))
+    check("on-sky plots draw", os.path.getsize(os.path.join(TMP, "sky.png")) > 10000)
+
+
 def s4_history():
     import history
     key = history.record_run("check", "selftest", {"ok": True}, app="selftest")
@@ -244,6 +293,8 @@ def s5_window():
         for i in range(len(app.pages)):
             app.show_page(i)
             app.update()
+        check("the Sky page is built", getattr(app, "sky_page", None) is not None
+              and app.pages[2] is app.sky_page and app.title_var.get() != "")
         app.show_credits()
         app.update()
         check("every page and Credits open", app.title_var.get() == "Credits and sources")
@@ -270,6 +321,7 @@ def main() -> int:
     section("3  Reading frames and Check image (synthetic frames)", s3_check)
     section("3b The bench run (synthetic flat-pair ladders)", s3b_bench)
     section("3c The dark run and the spec curves (synthetic darks)", s3c_darks)
+    section("3d On-sky (synthetic nights)", s3d_onsky)
     section("4  Run history", s4_history)
     section("5  The window", s5_window)
     section("6  Your SHOBS data folder (read only)", s6_data_folder)

@@ -116,7 +116,8 @@ class TestApp(TempData):
         for i in range(len(app.pages)):
             app.show_page(i)
             app.update()
-        self.assertIn("on-sky log", app.pages[2].var.get())
+        self.assertIs(app.pages[2], app.sky_page)
+        self.assertIn("on-sky log", app.sky_page.logs_var.get())
         app.show_credits()
         app.update()
         self.assertEqual(app.title_var.get(), "Credits and sources")

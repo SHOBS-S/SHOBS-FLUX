@@ -50,6 +50,8 @@ def _title(ax, text):
 
 def _empty(ax, text):
     ax.text(0.5, 0.5, text, ha="center", va="center", color=HINT, fontsize=FONT, transform=ax.transAxes)
+    ax.set_xticks([])
+    ax.set_yticks([])
 
 
 def _finite(v) -> bool:
@@ -91,6 +93,19 @@ def draw(fig, summary, selected=None) -> None:
     _seeing_nights(axes[3], summary)
 
 
+def _legend_top(ax, ncol: int = 2, room: float = 0.32) -> None:
+    """The legend in a band of free space above the data (never over a point)."""
+    if not ax.get_legend_handles_labels()[0]:
+        return
+    lo, hi = ax.get_ylim()
+    inverted = lo > hi
+    a, b = (hi, lo) if inverted else (lo, hi)
+    b = b + room * (b - a)
+    ax.set_ylim((b, a) if inverted else (a, b))
+    ax.legend(loc="upper right", ncol=ncol, fontsize=9, frameon=True, framealpha=0.95, edgecolor=GRID,
+              handlelength=1.6, columnspacing=1.0, borderaxespad=0.3)
+
+
 def _night_words(r) -> str:
     return f"{r.ds.night} {r.ds.target}" if r is not None else ""
 
@@ -112,7 +127,7 @@ def _zp_airmass(ax, r):
         xs = np.linspace(float(np.min(x[ok])), float(np.max(x[ok])), 20)
         ax.plot(xs, r.zp1 - r.k_used * (xs - 1.0), color=INK, linewidth=1.4, zorder=4,
                 label=f"ZP1 {r.zp1:.3f}, k {r.k_used:.3f}")
-    ax.legend(loc="best", fontsize=9, frameon=True, framealpha=0.9, edgecolor=GRID)
+    _legend_top(ax, ncol=1, room=0.45)
 
 
 def _hours(jd) -> np.ndarray:
@@ -144,9 +159,9 @@ def _zp_time(ax, r):
         if flip.any():
             ax.axvspan(float(h[flip].min()), float(h[flip].max()), color="#ffe0b2", alpha=0.6, zorder=1,
                        label="after the meridian flip")
-            ax.legend(loc="best", fontsize=9, frameon=True, framealpha=0.9, edgecolor=GRID)
     if _finite(r.zp1):
-        ax.axhline(r.zp1, color=INK, linewidth=1.0, linestyle="--", zorder=2)
+        ax.axhline(r.zp1, color=INK, linewidth=1.0, linestyle="--", zorder=2, label=f"ZP1 {r.zp1:.3f}")
+    _legend_top(ax, ncol=2)
     from matplotlib.ticker import FuncFormatter
     ax.xaxis.set_major_formatter(FuncFormatter(lambda v, _p: f"{v % 24:g}"))
 
@@ -175,8 +190,7 @@ def _zp_nights(ax, summary):
             if _finite(bs.zp1_sigma):
                 ax.axhspan(bs.zp1 - bs.zp1_sigma, bs.zp1 + bs.zp1_sigma, color=col, alpha=0.12, zorder=1)
     _date_axis(ax)
-    if ax.get_legend_handles_labels()[0]:
-        ax.legend(loc="best", fontsize=9, frameon=True, framealpha=0.9, edgecolor=GRID)
+    _legend_top(ax, ncol=2)
 
 
 def _seeing_nights(ax, summary):
@@ -198,8 +212,9 @@ def _seeing_nights(ax, summary):
         ax.scatter([_day(r.ds.night) for r in dfc], [r.fwhm_arcsec for r in dfc], s=34, marker="^", color=ORANGE,
                    zorder=3, label="defocused")
     _date_axis(ax)
-    ax.set_ylim(bottom=0)
-    ax.legend(loc="best", fontsize=9, frameon=True, framealpha=0.9, edgecolor=GRID)
+    top = max(r.fwhm_arcsec for r in rs)
+    ax.set_ylim(0, top * 1.15)
+    _legend_top(ax, ncol=3, room=0.35)
 
 
 def _date_axis(ax):
