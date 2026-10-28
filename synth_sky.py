@@ -36,7 +36,7 @@ def make_log(night: str = "2026-10-20", target: str = "Test Star", band: str = "
              mags=None, seeing: float = 3.5, sky_mag: float = 19.5, read_noise: float = 1.2, cy: float = 1.5,
              aperture_mm: float = 356.0, elevation_m: float = 300.0, haze_mag: float = 0.0, cat_error: dict | None = None,
              saturate: int | None = None, variable: int | None = None, flip_after: int | None = None,
-             flip_step: float = 0.0, focuspos: float = 6400.0, precalibrated: bool = False, seed: int = 1,
+             flip_step: float = 0.0, cloud_mag: float = 0.0, focuspos: float = 6400.0, precalibrated: bool = False, seed: int = 1,
              run_id: str | None = None, written: str | None = None, written_by: str = "SHOBS-P 2.2.19.1",
              aperture_px: float = 13.0, noise: bool = True, linear_limit: float = 52775.0) -> tuple[dict, dict]:
     """(log document, truth). airmass: (start, end) — a straight track in time. cat_error {star index: mag added to
@@ -67,6 +67,8 @@ def make_log(night: str = "2026-10-20", target: str = "Test Star", band: str = "
     jds = t0 + (np.arange(n_frames) * step_s + exptime / 2.0) / 86400.0
     x = np.linspace(airmass[0], airmass[1], n_frames)
     haze = np.linspace(0.0, haze_mag, n_frames)
+    # thin cloud passing in the middle of the night (a bump, not along the airmass track)
+    haze = haze + cloud_mag * np.exp(-((np.arange(n_frames) - n_frames / 2.0) / (n_frames / 8.0)) ** 2)
     flip = np.zeros(n_frames)
     if flip_after is not None:
         flip[flip_after:] = flip_step

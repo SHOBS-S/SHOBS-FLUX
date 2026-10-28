@@ -82,6 +82,16 @@ class TestOneNight(TempData):
         self.assertTrue(r.photometric, r.lines)
         self.assertTrue(any("meridian flip" in x for _, x in r.lines))
 
+    def test_flip_step_with_a_long_airmass_track(self):
+        ds, t = night(airmass=(1.05, 1.6), flip_after=60, flip_step=0.03)
+        r = onsky.analyse(ds, None, 356, 300)
+        self.assertLess(abs(r.k - t["k"]), 0.02, r.k)
+        self.assertLess(abs(r.zp1 - t["zp1"] - 0.015), 0.02)                # the average of the two sides
+
+    def test_cloud_bump(self):
+        ds, t = night(cloud_mag=0.08)
+        self.assertFalse(onsky.analyse(ds, None, 356, 300).photometric)
+
     def test_short_exposures(self):
         ds, t = night(exptime=0.75, overhead=30.0, n_frames=200, airmass=(1.08, 1.14),
                       mags=[8.7, 9.1, 9.4, 9.6, 11.2, 9.8])

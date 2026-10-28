@@ -551,6 +551,11 @@ def analyse(ds: Dataset, k_prior: tuple | None = None, aperture_mm: float | None
         return res
     x = ds.airmass
     res.x_span = float(np.nanmax(x[ok]) - np.nanmin(x[ok]))
+    zf, flip_step = _remove_flip_step(zf, x, ds.segment, ok)
+    if flip_step is not None:
+        res.zp_frame = zf
+        L.append(("info", f"The zero point steps {flip_step:+.3f} mag at the meridian flip (the other pier side: "
+                          "flats or vignetting differ); taken out, so the night is judged as one."))
     fit = linfit(x, zf)
     if fit is None:
         res.why_not = "the zero points could not be fitted"
@@ -581,12 +586,8 @@ def analyse(ds: Dataset, k_prior: tuple | None = None, aperture_mm: float | None
             (TYPICAL_K.get(ds.catalog_band, 0.2), "typical")
         res.k_used, res.k_used_source = kp, src
         flat = zf + kp * (x - 1.0)                         # each frame's zero point moved to airmass 1
-        flat, step_mag = _segment_steps(flat, ds.segment, ok)
         keep = clipped(flat, nsig=3.0) & ok
         r = flat - np.mean(flat[keep])
-        if step_mag is not None:
-            L.append(("info", f"The zero point steps {step_mag:+.3f} mag at the meridian flip (the other pier side: "
-                              "flats or vignetting differ); the two sides are judged each about its own level."))
         res.rms = float(np.sqrt(np.mean(r[keep] ** 2)))
         res.bin_rms, nbins, res.bin_range = binned_rms(ds.jd[ok], r[ok])
         res.photometric = bool(math.isfinite(res.bin_rms) and res.bin_rms <= PHOT_BIN_RMS
@@ -633,31 +634,32 @@ def analyse(ds: Dataset, k_prior: tuple | None = None, aperture_mm: float | None
     return res
 
 
-def _segment_steps(z, segment, ok):
-    """(z with each segment moved onto the first one's level, the step in mag or None) when the night has a second
-    segment (after a meridian flip) of at least 5 frames; else (z, None)."""
+def _remove_flip_step(z, x, segment, ok):
+    """(z with the step at a meridian flip taken out, the step in mag or None). The step is fitted together with a
+    straight line in airmass (z = a + b (X − 1) + step × after-flip), so a changing airmass is not mistaken for it.
+    Only when both sides have at least 5 frames; the frames' average level is kept."""
     if segment is None or len(segment) != len(z):
         return z, None
-    seg = np.asarray(segment, dtype=object)
-    names = [n for n in dict.fromkeys(seg.tolist())]
-    if len(names) < 2:
+    seg = np.asarray([str(v or "") for v in segment], dtype=object)
+    after = (seg != seg[np.argmax(ok)]) if ok.any() else np.zeros(len(z), bool)
+    n_after, n_before = int((after & ok).sum()), int((~after & ok).sum())
+    if min(n_after, n_before) < 5:
         return z, None
-    sizes = {n: int(((seg == n) & ok).sum()) for n in names}
-    if min(sizes.values()) < 5:
-        return z, None
-    first = names[0]
-    base = float(np.median(z[(seg == first) & ok]))
-    out = np.array(z, dtype=float)
-    step = None
-    for n in names[1:]:
-        m = (seg == n)
-        lev = float(np.median(z[m & ok]))
-        out[m] = z[m] - (lev - base)
-        step = lev - base if step is None else step
-    # the profile's zero point stays the frames' own average: put the level back to the weighted mean
-    tot = sum(sizes.values())
-    mean_shift = sum(sizes[n] * (float(np.median(z[(seg == n) & ok])) - base) for n in names) / tot
-    return out + mean_shift, step
+    use = ok.copy()
+    step = 0.0
+    for _ in range(4):                                   # clipped least squares
+        X = np.vstack([np.ones(use.sum()), x[use] - 1.0, after[use].astype(float)]).T
+        coef, *_ = np.linalg.lstsq(X, z[use], rcond=None)
+        r = z - (coef[0] + coef[1] * (x - 1.0) + coef[2] * after)
+        s = rsigma(r[use]) or 1e-3
+        new = ok & (np.abs(r) <= 3 * max(s, 1e-4))
+        step = float(coef[2])
+        if (new == use).all():
+            break
+        use = new
+    frac = n_after / float(n_after + n_before)
+    out = np.array(z, dtype=float) - step * after + step * frac
+    return out, step
 
 
 def _seeing(res: NightResult) -> None:
