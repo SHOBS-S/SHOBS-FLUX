@@ -102,9 +102,10 @@ class TestSkyHelpers(TempData):
                 fh.write("{not json")
             self.assertEqual(sky_page.shobs_p_telescope(), {})                  # damaged
             with open(p, "w") as fh:
-                json.dump({"telescope_name": "14in RC", "aperture_mm": 356, "elevation": "300"}, fh)
+                json.dump({"telescope_name": "14in RC", "aperture_mm": 356, "site_elevation": "300", "site_lat": "35.3027", "site_lon": "-81.94"}, fh)
             self.assertEqual(sky_page.shobs_p_telescope(),
-                             {"name": "14in RC", "aperture_mm": 356.0, "elevation_m": 300.0})
+                             {"name": "14in RC", "aperture_mm": 356.0, "elevation_m": 300.0, "lat": 35.3027,
+                              "lon": -81.94})
 
     def test_setups(self):
         import sky_page

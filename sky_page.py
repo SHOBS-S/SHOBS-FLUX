@@ -56,10 +56,14 @@ def shobs_p_telescope() -> dict:
     name = got.get("telescope_name")
     if isinstance(name, str) and name.strip():
         out["name"] = name.strip()
-    for key, mine in (("aperture_mm", "aperture_mm"), ("elevation", "elevation_m"), ("lat", "lat"), ("lon", "lon")):
-        v = sp._finite(got.get(key))
-        if v is not None:
-            out[mine] = v
+    # SHOBS-P keeps the site as site_lat / site_lon / site_elevation (text); older names as a fallback
+    for keys, mine in ((("aperture_mm",), "aperture_mm"), (("site_elevation", "elevation"), "elevation_m"),
+                       (("site_lat", "lat"), "lat"), (("site_lon", "lon"), "lon")):
+        for key in keys:
+            v = sp._finite(str(got.get(key)).strip().replace(",", "") if got.get(key) is not None else None)
+            if v is not None:
+                out[mine] = v
+                break
     return out
 
 
