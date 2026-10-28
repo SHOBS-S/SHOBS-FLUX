@@ -148,7 +148,7 @@ class TestNights(TempData):
         self.assertEqual(len(s.nights), 4)
         b = s.bands["TG"]
         self.assertIn("2026-10-21", b.zp_out)                               # 0.6 mag off: set aside
-        self.assertNotIn("2026-10-20", b.zp_nights and [k for k in b.zp_out if k.startswith("2026-10-20")] or [])
+        self.assertIn("2026-10-20", b.zp_nights)
         self.assertLess(abs(b.zp1 - t["zp1"]), 0.02, (b.zp1, b.zp_nights))
         self.assertLess(abs(b.k - t["k"]), 0.02)
         self.assertLess(abs(b.fwhm_in_focus - 3.5), 0.15)
