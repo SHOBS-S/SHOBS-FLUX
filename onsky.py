@@ -70,6 +70,7 @@ MIN_STARS = 2                 # catalogued stars a night needs for a zero point
 MIN_FRAMES = 10               # frames a night needs
 BIN_DAYS = 10.0 / 1440.0      # 10-minute bins for the photometric test
 PHOT_BIN_RMS = 0.025          # binned residual rms (mag) a photometric night stays within
+MIN_BINS = 3                  # a night needs this many bins before it can be called photometric
 PHOT_BIN_RANGE = 0.05         # and the lowest to the highest 10-minute bin (mag): haze coming or going
 K_MIN_SPAN = 0.25             # airmass span a night needs to measure extinction
 K_RANGE = (0.0, 1.0)          # a physical extinction coefficient
@@ -122,6 +123,7 @@ class Dataset:
     flux: np.ndarray                    # frames × stars, log units (NaN = not measured)
     peak: np.ndarray                    # frames × stars, raw ADU
     segment: np.ndarray = None          # per frame: '' or 'flip' (SHOBS-P marks the frames after a meridian flip)
+    cadence: dict | None = None         # a FLUX folder run's time between ALL its lights (it may measure every Nth)
     n_frames_in_log: int = 0
     precalibrated: bool = False
     notes: list = field(default_factory=list)
@@ -306,7 +308,8 @@ def load_dataset(path_or_doc, cam_lookup=None, path: str = "") -> Dataset:
         read_noise_e=nums["read_noise_e"], aperture_px=_f(meas.get("aperture_radius_px")), names=names,
         cat=np.array(cats, dtype=float), jd=col("jd_mid"), airmass=col("airmass"), exptime=col("exptime_s"),
         focuspos=col("focuspos"), fwhm_px=col("fwhm_px"), sky=col("sky"), flux=flux, peak=peak,
-        segment=np.array([str(f.get("segment") or "") for f in keep], dtype=object), n_frames_in_log=len(frames_in), precalibrated=pre)
+        segment=np.array([str(f.get("segment") or "") for f in keep], dtype=object),
+        cadence=doc.get("cadence") if isinstance(doc.get("cadence"), dict) else None, n_frames_in_log=len(frames_in), precalibrated=pre)
     if not ds.night and nf:
         ds.night = night_of(float(np.nanmin(ds.jd)))
     return ds
@@ -417,6 +420,8 @@ def binned_rms(jd, resid, width: float = BIN_DAYS) -> tuple[float, int, float]:
     if ok.sum() < 3:
         return float("nan"), 0, float("nan")
     jd, r = jd[ok], r[ok]
+    if len(jd) > 1:                                      # sparse frames: wide enough bins for 3 frames each
+        width = max(width, 3.0 * float(np.median(np.diff(np.sort(jd)))))
     b = np.floor((jd - jd.min()) / width).astype(int)
     means = [float(np.median(r[b == i])) for i in np.unique(b) if (b == i).sum() >= 3]   # one odd frame moves no bin
     if len(means) < 2:
@@ -570,7 +575,7 @@ def analyse(ds: Dataset, k_prior: tuple | None = None, aperture_mm: float | None
         resid = zf - (a + b * (x - 1.0))
         bin_rms, nbins, bin_range = binned_rms(ds.jd[ok], resid[ok])     # every frame: clipping would hide haze
         k_ok = bool(math.isfinite(bin_rms) and bin_rms <= PHOT_BIN_RMS and bin_range <= PHOT_BIN_RANGE
-                    and keep.mean() >= 0.8)
+                    and nbins >= MIN_BINS and keep.mean() >= 0.8)
     if k_ok:
         res.rms, res.bin_rms, res.bin_range = rms, bin_rms, bin_range
         res.photometric = True
@@ -591,7 +596,7 @@ def analyse(ds: Dataset, k_prior: tuple | None = None, aperture_mm: float | None
         res.rms = float(np.sqrt(np.mean(r[keep] ** 2)))
         res.bin_rms, nbins, res.bin_range = binned_rms(ds.jd[ok], r[ok])
         res.photometric = bool(math.isfinite(res.bin_rms) and res.bin_rms <= PHOT_BIN_RMS
-                               and res.bin_range <= PHOT_BIN_RANGE
+                               and res.bin_range <= PHOT_BIN_RANGE and nbins >= MIN_BINS
                                and keep.sum() >= MIN_FRAMES and keep.sum() >= 0.8 * ok.sum())
         res.x_mean = float(np.mean(x[keep]))
         res.zp_mean = float(np.mean(zf[keep]))
@@ -602,10 +607,10 @@ def analyse(ds: Dataset, k_prior: tuple | None = None, aperture_mm: float | None
 
     # findings
     L.append(("ok" if res.photometric else "warn",
-              (f"✔ Photometric: the zero point held within {res.bin_range:.3f} mag across {nbins} 10-minute bins "
+              (f"✔ Photometric: the zero point held within {res.bin_range:.3f} mag across {nbins} time bins "
                f"(rms {res.bin_rms:.3f})."
                if res.photometric else
-               f"⚠ Not photometric: the zero point moved {res.bin_range:.3f} mag across the night in 10-minute bins "
+               f"⚠ Not photometric: the zero point moved {res.bin_range:.3f} mag across the night in time bins "
                f"(rms {res.bin_rms:.3f}; limits {PHOT_BIN_RANGE} and {PHOT_BIN_RMS}): clouds or haze. Kept out of "
                "the zero point and extinction; seeing, sky, scintillation and cadence still count.")))
     if k_ok:
@@ -680,6 +685,16 @@ def _seeing(res: NightResult) -> None:
 
 def _cadence(res: NightResult) -> None:
     ds = res.ds
+    if ds.cadence is not None or ds.source == "SHOBS-FLUX":
+        # a folder run may measure only every Nth light: its frames' spacing says nothing; it wrote the spacing of
+        # all its lights instead
+        c = ds.cadence or {}
+        iv, ex, n = _f(c.get("interval_s")), _f(c.get("exptime_s")), int(_f(c.get("n")) or 0)
+        if iv is not None and ex is not None and n >= 5 and iv - ex >= -0.5:
+            res.overhead_s, res.overhead_n, res.interval_s = max(iv - ex, 0.0), n, iv
+            res.lines.append(("info", f"Frames every {iv:.1f} s for {ex:g} s exposures: {res.overhead_s:.1f} s "
+                                      "between frames (download, save and any delay you set)."))
+        return
     order = np.argsort(ds.jd)
     t = ds.jd[order] * 86400.0
     e = ds.exptime[order]

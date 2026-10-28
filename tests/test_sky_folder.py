@@ -71,7 +71,7 @@ class TestFolderRuns(FolderCase):
         self.assertNotIn("mirrored", line)
 
     def test_c_mono_sloan_i_mirrored(self):
-        truth, res, ds, night = self.run_case(osc=False, wcs=False, flip=True)
+        truth, res, ds, night = self.run_case(osc=False, wcs=False, flip=True, n_frames=20)
         self.check_recovered(truth, res, ds, night)
         self.assertEqual(res.doc["band"], "SI")
         self.assertEqual(res.doc["catalog_band"], "SI")

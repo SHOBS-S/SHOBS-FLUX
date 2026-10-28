@@ -51,7 +51,7 @@ CROWD_MAG = 2.5               # "brighter" = brighter than the star's magnitude 
 VSX_ARCSEC = 5.0
 SKY_GAP, SKY_WIDTH = 4.0, 8.0  # the sky ring starts this far beyond the aperture and is this wide (measured px)
 MIN_APERTURE = 3.0
-APERTURE_FWHM = 2.0
+APERTURE_FWHM = 2.5           # aperture radius in FWHMs (each frame's own: ~99 % of a star's light)
 CENTROID_PX = 3.0             # a star's centre may move this far from its predicted place
 FOUND_FRACTION = 0.30         # a frame where fewer of its stars show is clouded
 BLIND_MIN_MATCH = 8
@@ -632,6 +632,7 @@ def run_folder(folder: str, channel: str = "G", step=None, catalog=None, cam_loo
                           f"({cam_id}, {cams[cam_id]} frames) is measured."))
         lights = [(p, h) for p, h in lights if sp.setup_key(h)["camera_id"] == cam_id]
     lights.sort(key=lambda t: (jd_mid_of(t[1]) or 0.0, t[0]))
+    cadence = cadence_of(lights)                  # from EVERY light's header, before any are skipped for speed
     if len(lights) > max_frames:
         L.append(("info", f"{len(lights)} light frames: every {len(lights) / max_frames:.1f}th of them is measured "
                           f"({max_frames})."))
@@ -906,6 +907,21 @@ def run_folder(folder: str, channel: str = "G", step=None, catalog=None, cam_loo
                 fw.append(g)
             if len(fw) >= FWHM_STARS:
                 break
+        # the aperture follows this frame's seeing (a fixed one loses light as the seeing grows through the night,
+        # which would read as extinction): measured again when the frame's stars are larger than the first's
+        r_k, rin_k, rout_k = r_ap, rin, rout
+        if fw:
+            want = round(max(MIN_APERTURE, APERTURE_FWHM * float(np.median(fw))), 2)
+            if want > r_ap * 1.15:
+                r_k = want
+                rin_k, rout_k = r_k + SKY_GAP, r_k + SKY_GAP + SKY_WIDTH
+                again = {}
+                for name, v in meas.items():
+                    ph = photometry(im, float(v["x"]), float(v["y"]), r_k, rin_k, rout_k)
+                    if ph is not None:
+                        again[name] = ph
+                if again:
+                    meas = again
         skies = [v["sky"] for v in meas.values() if math.isfinite(v["sky"])]
         sky = (float(np.median(skies)) - bias_px) if skies else None
         pier = _str(f.header, "PIERSIDE")
@@ -924,6 +940,7 @@ def run_folder(folder: str, channel: str = "G", step=None, catalog=None, cam_loo
                            "exptime_s": float(exptime), "focuspos": fr.hfloat(f.header, "FOCUSPOS", "FOCPOS"),
                            "pierside": pier, "ccd_temp_c": fr.hfloat(f.header, "CCD-TEMP"), "segment": seg,
                            "fwhm_px": _rnd(np.median(fw), 3) if fw else None, "sky": _rnd(sky, 3), "flag": "",
+                           "aperture_px": r_k,
                            "precalibrated": bool(cal), "stars": stars_k,
                            "_site": (fr.hfloat(f.header, "SITELAT", "LAT-OBS", "OBSLAT"),
                                      fr.hfloat(f.header, "SITELONG", "LONG-OBS", "OBSLONG"),
@@ -992,6 +1009,8 @@ def run_folder(folder: str, channel: str = "G", step=None, catalog=None, cam_loo
            "catalog_band": cat_band, "catalog_service": field_doc.get("service") or "",
            "field_centre": {"ra": _rnd(ra_c, 6), "dec": _rnd(dec_c, 6)}, "measurement": measurement,
            "precalibrated": bool(precal), "stars": stars_list, "frames": out_frames}
+    if cadence:
+        doc["cadence"] = cadence
     res.doc = doc
     res.n_frames = len(out_frames)
     res.n_matched = len(sel)
@@ -999,6 +1018,25 @@ def run_folder(folder: str, channel: str = "G", step=None, catalog=None, cam_loo
     L.insert(0, ("ok", f"✔ {len(out_frames)} of {n_lights} frames measured in {onsky.BAND_WORDS.get(band, band)}, "
                        f"{len(sel)} catalogued stars, night of {night}."))
     return res
+
+
+def cadence_of(lights: list) -> dict | None:
+    """Time from one light to the next, from all the folder's headers (frames measured may be every Nth):
+    {"interval_s", "exptime_s", "n"} for the most common exposure, or None. Gaps over 2.5 × the median left out."""
+    rows = [(jd_mid_of(h), fr.exptime_of(h)) for _p, h in lights]
+    rows = sorted((j, e) for j, e in rows if j and e)
+    if len(rows) < 6:
+        return None
+    exp = Counter(round(e, 3) for _j, e in rows).most_common(1)[0][0]
+    dt = [(b[0] - a[0]) * 86400.0 for a, b in zip(rows, rows[1:])
+          if round(a[1], 3) == exp and round(b[1], 3) == exp and b[0] > a[0]]
+    if len(dt) < 5:
+        return None
+    med = float(np.median(dt))
+    dt = [d for d in dt if d <= 2.5 * med]
+    if len(dt) < 5:
+        return None
+    return {"interval_s": round(float(np.median(dt)), 3), "exptime_s": float(exp), "n": len(dt)}
 
 
 def save_log(doc: dict) -> str:
