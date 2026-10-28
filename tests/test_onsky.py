@@ -155,8 +155,7 @@ class TestNights(TempData):
         self.assertIn("+125 steps", b.fwhm_defocus)                         # 6525 − 6400 the same night
         nights = {r.ds.night + r.ds.target: r for r in s.nights}
         self.assertEqual(nights["2026-10-22HD 1"].defocus_key, "+125 steps")  # no in-focus run: same size
-        self.assertLess(abs(s.overhead_s - 3.0), 0.2)
-        self.assertLess(abs(s.overhead_short_s - 30.0), 0.5)
+        self.assertLess(abs(s.overhead_s - 3.0), 0.2)                       # the 30 s runs (a set delay) don't count
         self.assertTrue(math.isfinite(b.cy))
 
     def test_profile(self):

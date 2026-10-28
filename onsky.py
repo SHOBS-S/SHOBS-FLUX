@@ -25,12 +25,14 @@ frames' zero points are fitted against airmass (3-sigma clipping): ZP(X) = ZP1 �
                 frame-to-frame scatter of each star against the others, after taking out photon, sky and read noise.
                 Needs the telescope aperture and the site elevation (typed on the Sky page; the site is never stored
                 in a profile).
-  Cadence       median time between frames minus the exposure = the per-frame overhead (gaps and flips left out).
+  Cadence       median time between frames minus the exposure = the time between frames (gaps and flips left out).
+                It holds any delay set in the capture software, which the headers do not record; so across nights
+                the profile's overhead is the LOWEST run's (a delay only adds).
 
 LEARNING (combine). Only the newest log of each night + target + band counts (a re-run replaces the first). Nights
 are combined per band: zero point and extinction from photometric nights only, each night once, 3-sigma clipped
 across nights (a night that disagrees is set aside, not averaged in); seeing in focus and per defocus key; sky from
-the darkest (Moon under 25 % lit) nights when there are any; C_Y and the overhead as medians. The result is written
+the darkest (Moon under 25 % lit) nights when there are any; C_Y as the median; the overhead as the lowest run's. The result is written
 into the system profile (format v1, shobs_profile.py) by apply_to_profile, after changes_for shows what changes.
 
 Standard library + numpy (+ astropy for the Moon, optional)."""
@@ -75,7 +77,6 @@ DEFOCUS_ARCSEC = 7.0          # a night's median FWHM above this is defocused
 DEFOCUS_RATIO = 2.2           # or this many times the best in-focus run the same night
 DARK_MOON = 0.25              # Moon illuminated fraction below which a night counts as dark for the sky
 SCALE_HEIGHT_M = 8000.0       # Osborn et al. 2015
-SHORT_EXPOSURE_S = 10.0       # exposures shorter than this get their own overhead (cadence.overhead_short_s)
 SCINT_MIN_FRACTION = 0.5      # a star informs C_Y only when scintillation should be at least this share of its variance
 CLIP_SIGMA = 3.0              # across nights (the profile's learning rule)
 ZP_FLOOR = 0.01               # mag: the least uncertainty one night's zero point is given
@@ -168,6 +169,7 @@ class NightResult:
     cy_n: int = 0
     overhead_s: float = float("nan")
     overhead_n: int = 0
+    interval_s: float = float("nan")                   # median time from one frame to the next
     exptime_s: float = float("nan")
 
     @property
@@ -693,6 +695,9 @@ def _cadence(res: NightResult) -> None:
     oh = float(np.median(dt)) - float(np.median(e))
     if oh >= -0.5:
         res.overhead_s, res.overhead_n = max(oh, 0.0), int(dt.size)
+        res.interval_s = float(np.median(dt))
+        res.lines.append(("info", f"Frames every {res.interval_s:.1f} s for {float(np.median(e)):g} s exposures: "
+                                  f"{res.overhead_s:.1f} s between frames (download, save and any delay you set)."))
 
 
 def _sky(res: NightResult, zf) -> None:
@@ -794,9 +799,8 @@ class Summary:
     overhead_s: float = float("nan")
     overhead_sigma: float = float("nan")
     overhead_n: int = 0
-    overhead_short_s: float = float("nan")
-    overhead_short_sigma: float = float("nan")
-    overhead_short_n: int = 0
+    overhead_runs: int = 0
+    overhead_from: str = ""
     camera_ids: list = field(default_factory=list)
     lines: list = field(default_factory=list)
 
@@ -917,19 +921,13 @@ def combine(results: list, replaced: list | None = None, old_profile: dict | Non
         out[band] = bs
     s = Summary(nights=sorted(results, key=lambda r: (r.ds.night, r.ds.written), reverse=True),
                 replaced=list(replaced or []), bands=out)
-    # the overhead per frame depends on the exposure (the capture software may wait longer between short ones):
-    # science exposures (≥ 10 s) set overhead_s, short ones get overhead_short_s
-    for short in (False, True):
-        oh = [(r.overhead_s, r.overhead_n) for r in usable if math.isfinite(r.overhead_s)
-              and (r.exptime_s < SHORT_EXPOSURE_S) == short]
-        if oh:
-            v = float(np.median([v for v, _ in oh]))
-            sg = rsigma([v for v, _ in oh])
-            n = int(sum(n for _, n in oh))
-            if short:
-                s.overhead_short_s, s.overhead_short_sigma, s.overhead_short_n = v, sg, n
-            else:
-                s.overhead_s, s.overhead_sigma, s.overhead_n = v, sg, n
+    # the overhead per frame: the LOWEST run's value. The headers cannot tell a delay set in the capture software
+    # (e.g. 30 s between 0.75 s frames) from the download and save time, and a delay only ever adds to it.
+    oh = [(r.overhead_s, r.overhead_n, r) for r in usable if math.isfinite(r.overhead_s)]
+    if oh:
+        v, n, best = min(oh, key=lambda t: t[0])
+        s.overhead_s, s.overhead_n, s.overhead_runs = v, n, len(oh)
+        s.overhead_from = f"{best.ds.night} {best.ds.target}, {best.exptime_s:g} s exposures"
     s.camera_ids = sorted({r.ds.camera_id for r in results})
     return s
 
@@ -1021,23 +1019,18 @@ def measured_records(s: Summary, run_key: str | None = None) -> tuple[dict, dict
     cad = {}
     last = max((r.ds.night for r in s.nights), default=None)
     if math.isfinite(s.overhead_s):
-        cad["overhead_s"] = sp.record(_rnd(s.overhead_s, 2), "s", "measured", sigma=_rnd(s.overhead_sigma, 2),
-                                      n=s.overhead_n, date=last, conditions=f"exposures of {SHORT_EXPOSURE_S:g} s "
-                                      "and longer", run=run_key,
-                                      note="time between frames minus the exposure (gaps left out)")
-    if math.isfinite(s.overhead_short_s):
-        cad["overhead_short_s"] = sp.record(_rnd(s.overhead_short_s, 2), "s", "measured",
-                                            sigma=_rnd(s.overhead_short_sigma, 2), n=s.overhead_short_n, date=last,
-                                            conditions=f"exposures shorter than {SHORT_EXPOSURE_S:g} s", run=run_key,
-                                            note="time between frames minus the exposure (gaps left out)")
+        cad["overhead_s"] = sp.record(_rnd(s.overhead_s, 2), "s", "measured", n=s.overhead_n, date=last,
+                                      conditions=f"lowest of {s.overhead_runs} run{'s' if s.overhead_runs != 1 else ''}"
+                                      f" ({s.overhead_from})", run=run_key,
+                                      note="time between frames minus the exposure (gaps left out); a delay set in "
+                                      "the capture software only adds to it, so the lowest run counts")
     return bands, cad
 
 
 LABELS = {"zero_point": ("Zero point", "mag (1 e⁻/s)", 3), "extinction_k": ("Extinction", "mag/airmass", 3),
           "sky_brightness": ("Sky", "mag/″²", 2), "fwhm_in_focus": ("Seeing in focus", "″", 2),
           "fwhm_defocus": ("Defocused", "″", 2), "scintillation_cy": ("Scintillation C_Y", "", 2),
-          "overhead_s": ("Overhead per frame", "s", 2),
-          "overhead_short_s": ("Overhead per frame (short exposures)", "s", 2)}
+          "overhead_s": ("Overhead per frame", "s", 2)}
 
 
 def changes_for(s: Summary, doc: dict | None) -> list:
@@ -1143,6 +1136,7 @@ def night_values(r: NightResult, system_id: str) -> list:
     add("bands.fwhm_defocus" if r.defocused else "bands.fwhm_in_focus", r.fwhm_arcsec, "arcsec", r.fwhm_sigma)
     add("bands.scintillation_cy", r.cy, "Young C_Y")
     add("cadence.overhead_s", r.overhead_s, "s")
+    add("cadence.interval_s", r.interval_s, "s")
     return rows
 
 
