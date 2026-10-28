@@ -73,6 +73,7 @@ DEFOCUS_ARCSEC = 7.0          # a night's median FWHM above this is defocused
 DEFOCUS_RATIO = 2.2           # or this many times the best in-focus run the same night
 DARK_MOON = 0.25              # Moon illuminated fraction below which a night counts as dark for the sky
 SCALE_HEIGHT_M = 8000.0       # Osborn et al. 2015
+SHORT_EXPOSURE_S = 10.0       # exposures shorter than this get their own overhead (cadence.overhead_short_s)
 SCINT_MIN_FRACTION = 0.3      # a star informs C_Y only when scintillation is at least this share of its variance
 CLIP_SIGMA = 3.0              # across nights (the profile's learning rule)
 ZP_FLOOR = 0.01               # mag: the least uncertainty one night's zero point is given
@@ -547,26 +548,38 @@ def analyse(ds: Dataset, k_prior: tuple | None = None, aperture_mm: float | None
         return res
     a, b, sa, sb, rms, keep = fit
     k_fit, k_fit_s = -b, sb
-    resid = zf - (a + b * (x - 1.0))
-    res.rms = rms
-    res.bin_rms, nbins = binned_rms(ds.jd[keep], resid[keep])
-    res.photometric = bool(math.isfinite(res.bin_rms) and res.bin_rms <= PHOT_BIN_RMS and keep.sum() >= MIN_FRAMES
-                           and keep.mean() >= 0.8)
-    k_ok = res.photometric and res.x_span >= K_MIN_SPAN and K_RANGE[0] <= k_fit <= K_RANGE[1] and \
-        k_fit_s < 0.1
-    res.x_mean = float(np.mean(x[keep]))
-    zmean = float(np.mean(zf[keep]))
-    res.zp_mean = zmean
+    nbins = 0
+    k_ok = False
+    if res.x_span >= K_MIN_SPAN and K_RANGE[0] <= k_fit <= K_RANGE[1] and k_fit_s < 0.1:
+        resid = zf - (a + b * (x - 1.0))
+        bin_rms, nbins = binned_rms(ds.jd[keep], resid[keep])
+        k_ok = bool(math.isfinite(bin_rms) and bin_rms <= PHOT_BIN_RMS and keep.mean() >= 0.8)
     if k_ok:
+        res.rms, res.bin_rms = rms, bin_rms
+        res.photometric = True
         res.k, res.k_sigma = k_fit, k_fit_s
         res.k_used, res.k_used_source = k_fit, "this night"
         res.zp1, res.zp1_sigma = a, max(sa, ZP_FLOOR)
+        res.x_mean = float(np.mean(x[keep]))
+        res.zp_mean = float(np.mean(zf[keep]))
     else:
+        # the extinction is not this night's to measure: hold it at the prior and judge the night against THAT
+        # (a free slope over a short airmass span would soak up a slow change in transparency)
         kp, src = k_prior if k_prior and k_prior[0] is not None and math.isfinite(k_prior[0]) else \
             (TYPICAL_K.get(ds.catalog_band, 0.2), "typical")
         res.k_used, res.k_used_source = kp, src
-        res.zp1 = zmean + kp * (res.x_mean - 1.0)
-        res.zp1_sigma = max(rms / math.sqrt(keep.sum()), ZP_FLOOR) + 0.02 * abs(res.x_mean - 1.0)
+        flat = zf + kp * (x - 1.0)                         # each frame's zero point moved to airmass 1
+        keep = clipped(flat, nsig=3.0) & ok
+        r = flat - np.mean(flat[keep])
+        res.rms = float(np.sqrt(np.mean(r[keep] ** 2)))
+        res.bin_rms, nbins = binned_rms(ds.jd[keep], r[keep])
+        res.photometric = bool(math.isfinite(res.bin_rms) and res.bin_rms <= PHOT_BIN_RMS
+                               and keep.sum() >= MIN_FRAMES and keep.sum() >= 0.8 * ok.sum())
+        res.x_mean = float(np.mean(x[keep]))
+        res.zp_mean = float(np.mean(zf[keep]))
+        res.zp1 = res.zp_mean + kp * (res.x_mean - 1.0)
+        res.zp1_sigma = max(res.rms / math.sqrt(keep.sum()), ZP_FLOOR) + 0.02 * abs(res.x_mean - 1.0)
+    rms = res.rms
     res.usable = True
 
     # findings
@@ -581,8 +594,10 @@ def analyse(ds: Dataset, k_prior: tuple | None = None, aperture_mm: float | None
     elif res.photometric and res.x_span < K_MIN_SPAN:
         L.append(("info", f"Extinction not measured: airmass only spanned {res.x_span:.2f} (needs {K_MIN_SPAN}); "
                           f"k = {res.k_used:.2f} used ({res.k_used_source})."))
-    elif res.photometric:
-        L.append(("warn", f"⚠ The fitted extinction ({k_fit:.3f} ± {k_fit_s:.3f}) is not physical; "
+    elif res.x_span >= K_MIN_SPAN:
+        L.append(("warn", f"⚠ Extinction not measured: the fit over airmass {np.nanmin(x[ok]):.2f}–"
+                          f"{np.nanmax(x[ok]):.2f} gave k = {k_fit:.3f} ± {k_fit_s:.3f}, which is not clean "
+                          f"(outside {K_RANGE[0]:g}–{K_RANGE[1]:g}, too uncertain, or the sky changed); "
                           f"k = {res.k_used:.2f} used ({res.k_used_source})."))
     L.append(("info", f"Zero point {res.zp1:.3f} ± {res.zp1_sigma:.3f} mag for 1 e⁻/s at airmass 1 "
                       f"({res.zp_mean:.3f} at airmass {res.x_mean:.2f}); {len(good)} catalogued stars, "
@@ -686,7 +701,7 @@ def _scintillation(res: NightResult, zp, good, aperture_m: float, elevation_m: f
         if not math.isfinite(excess) or excess <= 0 or excess < SCINT_MIN_FRACTION * var_obs:
             continue
         est.append(math.sqrt(excess / scint_share / f2))
-    if len(est) >= 2:
+    if len(est) >= 3:
         res.cy = float(np.median(est))
         res.cy_n = len(est)
         res.lines.append(("info", f"Scintillation C_Y {res.cy:.2f} from {len(est)} stars (Osborn et al. 2015; "
@@ -730,6 +745,9 @@ class Summary:
     overhead_s: float = float("nan")
     overhead_sigma: float = float("nan")
     overhead_n: int = 0
+    overhead_short_s: float = float("nan")
+    overhead_short_sigma: float = float("nan")
+    overhead_short_n: int = 0
     camera_ids: list = field(default_factory=list)
     lines: list = field(default_factory=list)
 
@@ -771,6 +789,23 @@ def _defocus_keys(results: list) -> None:
                 r.defocus_key = f"{int(round(off / 5.0) * 5):+d} steps"
             else:
                 r.defocus_key = "defocused"
+    # a defocused night with no in-focus run to measure the offset from: when it is the size of a defocus already
+    # keyed by its offset in the same band (within 25 %), it is taken to be that one (said in its findings)
+    known: dict = {}
+    for r in results:
+        if r.defocused and r.defocus_key.endswith("steps"):
+            known.setdefault((r.ds.band, r.defocus_key), []).append(r.fwhm_arcsec)
+    for r in results:
+        if not (r.defocused and r.defocus_key == "defocused"):
+            continue
+        near = [(abs(math.log(r.fwhm_arcsec / float(np.median(v)))), key) for (band, key), v in known.items()
+                if band == r.ds.band]
+        if near:
+            d, key = min(near)
+            if d <= math.log(1.25):
+                r.defocus_key = key
+                r.lines.append(("info", f"Defocus taken as {key}: no in-focus run that night to measure it from, "
+                                        f"and its stars are the size of the {key} nights."))
 
 
 def combine(results: list, replaced: list | None = None, old_profile: dict | None = None) -> Summary:
@@ -833,11 +868,19 @@ def combine(results: list, replaced: list | None = None, old_profile: dict | Non
         out[band] = bs
     s = Summary(nights=sorted(results, key=lambda r: (r.ds.night, r.ds.written), reverse=True),
                 replaced=list(replaced or []), bands=out)
-    oh = [(r.overhead_s, r.overhead_n) for r in usable if math.isfinite(r.overhead_s)]
-    if oh:
-        s.overhead_s = float(np.median([v for v, _ in oh]))
-        s.overhead_sigma = rsigma([v for v, _ in oh])
-        s.overhead_n = int(sum(n for _, n in oh))
+    # the overhead per frame depends on the exposure (the capture software may wait longer between short ones):
+    # science exposures (≥ 10 s) set overhead_s, short ones get overhead_short_s
+    for short in (False, True):
+        oh = [(r.overhead_s, r.overhead_n) for r in usable if math.isfinite(r.overhead_s)
+              and (r.exptime_s < SHORT_EXPOSURE_S) == short]
+        if oh:
+            v = float(np.median([v for v, _ in oh]))
+            sg = rsigma([v for v, _ in oh])
+            n = int(sum(n for _, n in oh))
+            if short:
+                s.overhead_short_s, s.overhead_short_sigma, s.overhead_short_n = v, sg, n
+            else:
+                s.overhead_s, s.overhead_sigma, s.overhead_n = v, sg, n
     s.camera_ids = sorted({r.ds.camera_id for r in results})
     return s
 
@@ -927,17 +970,25 @@ def measured_records(s: Summary, run_key: str | None = None) -> tuple[dict, dict
         if recs:
             bands[band] = recs
     cad = {}
+    last = max((r.ds.night for r in s.nights), default=None)
     if math.isfinite(s.overhead_s):
         cad["overhead_s"] = sp.record(_rnd(s.overhead_s, 2), "s", "measured", sigma=_rnd(s.overhead_sigma, 2),
-                                      n=s.overhead_n, date=max((r.ds.night for r in s.nights), default=None),
-                                      run=run_key, note="time between frames minus the exposure (gaps left out)")
+                                      n=s.overhead_n, date=last, conditions=f"exposures of {SHORT_EXPOSURE_S:g} s "
+                                      "and longer", run=run_key,
+                                      note="time between frames minus the exposure (gaps left out)")
+    if math.isfinite(s.overhead_short_s):
+        cad["overhead_short_s"] = sp.record(_rnd(s.overhead_short_s, 2), "s", "measured",
+                                            sigma=_rnd(s.overhead_short_sigma, 2), n=s.overhead_short_n, date=last,
+                                            conditions=f"exposures shorter than {SHORT_EXPOSURE_S:g} s", run=run_key,
+                                            note="time between frames minus the exposure (gaps left out)")
     return bands, cad
 
 
 LABELS = {"zero_point": ("Zero point", "mag (1 e⁻/s)", 3), "extinction_k": ("Extinction", "mag/airmass", 3),
           "sky_brightness": ("Sky", "mag/″²", 2), "fwhm_in_focus": ("Seeing in focus", "″", 2),
           "fwhm_defocus": ("Defocused", "″", 2), "scintillation_cy": ("Scintillation C_Y", "", 2),
-          "overhead_s": ("Overhead per frame", "s", 2)}
+          "overhead_s": ("Overhead per frame", "s", 2),
+          "overhead_short_s": ("Overhead per frame (short exposures)", "s", 2)}
 
 
 def changes_for(s: Summary, doc: dict | None) -> list:
