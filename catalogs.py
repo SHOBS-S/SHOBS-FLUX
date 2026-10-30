@@ -1,7 +1,7 @@
 """Field-star catalogs for the "folder of lights" run (sky_folder.py): APASS DR9 and Gaia DR3 from VizieR, the
 Gaia → Johnson-Cousins and Sloan relations, the VSX known-variable list, and the band helpers.
 
-The VizieR queries are SHOBS-P's (photometry_core): ASU-TSV over HTTPS (CDS first, then the CfA mirror), answers kept
+The VizieR queries are SHOBS-P's (photometry_core): ASU-TSV over HTTPS (CDS first, then the CfA and IDIA mirrors), answers kept
 for 30 days in the SHOBS data folder's cache/ (an answer VizieR marks as cut short or failed is never kept).
 
 Which catalog a band comes from: APASS for V, B, g′, r′, i′ (its own measured magnitudes), Gaia DR3 converted for
@@ -23,7 +23,8 @@ import numpy as np
 
 import shobs_profile as sp
 
-HOSTS = ("https://vizier.cds.unistra.fr", "https://vizier.cfa.harvard.edu")
+# CDS first, then the CfA and IDIA (Cape Town) mirrors; IDIA added 30 Oct 2026 when CDS and CfA were both down
+HOSTS = ("https://vizier.cds.unistra.fr", "https://vizier.cfa.harvard.edu", "https://vizier.idia.ac.za")
 USER_AGENT = "SHOBS-FLUX"
 CACHE_DAYS = 30.0
 APASS = "II/336/apass9"
@@ -240,7 +241,7 @@ def vizier(source: str, ra: float, dec: float, radius_deg: float, cols, constrai
         url = query_url(host, source, ra, dec, radius_deg, cols, out_max, sort, constraints)
         try:
             raw = fetch(url, timeout)
-        except Exception as exc:                        # no network, timeout, HTTP error: try the mirror
+        except Exception as exc:                        # no network, timeout, HTTP error: try the next mirror
             problems.append(f"{host.split('//')[-1]}: {getattr(exc, 'reason', None) or exc}")
             continue
         text = raw.decode("utf-8", "replace") if isinstance(raw, (bytes, bytearray)) else str(raw)

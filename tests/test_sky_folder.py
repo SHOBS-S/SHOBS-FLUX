@@ -328,11 +328,31 @@ class TestReviewCases(FolderCase):
             catalogs.vizier(catalogs.GAIA, 1.0, 2.0, 0.1, catalogs.GAIA_COLS, fetcher=portal)
         with self.assertRaises(catalogs.CatalogError):
             catalogs.vizier(catalogs.GAIA, 1.0, 2.0, 0.1, catalogs.GAIA_COLS, fetcher=portal)
-        self.assertEqual(len(calls), 4)                                   # asked again each time (2 hosts)
+        self.assertEqual(len(calls), 2 * len(catalogs.HOSTS))             # asked again each time (every host)
 
     def test_sexagesimal_site(self):
         self.assertAlmostEqual(sky_folder._angle_key({"SITELAT": "35 18 10"}, "SITELAT"), 35.30278, places=4)
         self.assertAlmostEqual(sky_folder._angle_key({"SITELONG": "-81:56:24"}, "SITELONG"), -81.94, places=4)
+
+
+class TestMirrors(TempData):
+    def test_idia_is_last(self):
+        self.assertEqual(catalogs.HOSTS[-1], "https://vizier.idia.ac.za")
+        self.assertEqual(len(catalogs.HOSTS), 3)
+
+    def test_falls_through_to_idia(self):
+        calls = []
+
+        def fetcher(url, timeout):
+            calls.append(url)
+            if "vizier.idia.ac.za" not in url:
+                raise OSError("timed out")
+            return TSV.encode()
+        rows, _inc, where = catalogs.vizier(catalogs.APASS, 1.0, 2.0, 0.1, catalogs.APASS_COLS, fetcher=fetcher,
+                                            use_cache=False)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(where, "vizier.idia.ac.za")
+        self.assertEqual(len(calls), 3)
 
 
 if __name__ == "__main__":
