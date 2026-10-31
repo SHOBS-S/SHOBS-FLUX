@@ -14,7 +14,7 @@ import shobs_profile as sp
 
 APP_NAME = "SHOBS-FLUX"
 APP_TITLE = "Shiloh Hill Observatory – Optical System Characterization (SHOBS-FLUX)"
-APP_VERSION = "0.4.0"          # milestone builds 0.1–0.6; 1.0.0 at release (John, 27 Oct 2026)
+APP_VERSION = "0.4.1"          # milestone builds 0.1–0.6; 1.0.0 at release (John, 27 Oct 2026)
 WRITTEN_BY = f"{APP_NAME} {APP_VERSION}"
 
 DEFAULTS = {"last_folder": "", "header_answers": {}}

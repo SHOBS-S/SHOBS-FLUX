@@ -189,7 +189,7 @@ def _zp_nights(ax, summary):
                        label=f"{onsky.BAND_WORDS.get(band, band)} {bs.zp1:.3f}")
             if _finite(bs.zp1_sigma):
                 ax.axhspan(bs.zp1 - bs.zp1_sigma, bs.zp1 + bs.zp1_sigma, color=col, alpha=0.12, zorder=1)
-    _date_axis(ax)
+    _date_axis(ax, [_day(r.ds.night) for r in nights])
     _legend_top(ax, ncol=2)
 
 
@@ -211,18 +211,21 @@ def _seeing_nights(ax, summary):
     if dfc:
         ax.scatter([_day(r.ds.night) for r in dfc], [r.fwhm_arcsec for r in dfc], s=34, marker="^", color=ORANGE,
                    zorder=3, label="defocused")
-    _date_axis(ax)
+    _date_axis(ax, [_day(r.ds.night) for r in rs])
     top = max(r.fwhm_arcsec for r in rs)
     ax.set_ylim(0, top * 1.15)
     _legend_top(ax, ncol=3, room=0.35)
 
 
-def _date_axis(ax):
+def _date_axis(ax, days):
+    """Dates on the x axis, the limits set from the nights themselves (matplotlib's own margins around one date are
+    years wide, which labelled every tick "Jan 01"); one night gets 1.5 days either side."""
     import matplotlib.dates as mdates
-    loc = mdates.AutoDateLocator(minticks=2, maxticks=5)
-    ax.xaxis.set_major_locator(loc)
-    ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %d"))
-    lo, hi = ax.get_xlim()
-    if hi - lo < 2:                                           # one night: give it some room either side
-        mid = (lo + hi) / 2.0
-        ax.set_xlim(mid - 1.5, mid + 1.5)
+    nums = [mdates.date2num(d) for d in days if d is not None]
+    if not nums:
+        return
+    lo, hi = min(nums), max(nums)
+    pad = 1.5 if hi - lo < 2 else max(1.0, 0.06 * (hi - lo))
+    ax.set_xlim(lo - pad, hi + pad)
+    ax.xaxis.set_major_locator(mdates.AutoDateLocator(minticks=2, maxticks=5))
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %d" if hi - lo < 300 else "%b %Y"))

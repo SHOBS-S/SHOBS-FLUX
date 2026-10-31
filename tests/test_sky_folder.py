@@ -121,6 +121,8 @@ class TestFolderProblems(TempData):
         self.assertEqual(s["exposures"], [60.0])
         self.assertEqual(s["target"], "Synthetic Field")
         self.assertEqual(s["night"], "2026-10-20")
+        self.assertTrue(s["camera_id"])                      # the setup: which Telescope boxes the folder takes
+        self.assertIsNotNone(s["focal"])
 
     def test_g_save_log_reads_back(self):
         truth = synth_lights.make_folder(self.path("lights"), n_frames=4, size=(500, 400), n_stars=40, n_faint=10)

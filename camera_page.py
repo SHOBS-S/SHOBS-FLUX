@@ -48,6 +48,14 @@ class CameraPage:
         self.bias_var = tk.StringVar(value=prefs.get("bench_bias_folder") or "")
         self.region_var = tk.StringVar(value=prefs.get("bench_region") or bench.DEFAULT_REGION)
         self.darks_var = tk.StringVar(value=prefs.get("dark_folder") or "")
+        # a remembered folder that has since moved (e.g. a dark library moved to another folder) is not offered as if it
+        # were still there: the box is left empty and the page says which one went
+        self._gone = []
+        for var, what in ((self.folder_var, "flat-pairs"), (self.bias_var, "bias"), (self.darks_var, "darks")):
+            v = var.get()
+            if v and not os.path.isdir(v):
+                self._gone.append(f"{what} folder {v}")
+                var.set("")
         self.measure_var = tk.StringVar(value=MEASURE_WORDS.get(prefs.get("camera_measure"), MEASURES[0][0]))
         self.picture_var = tk.StringVar(value="run")
         self.res = None                  # the bench run on screen
@@ -190,6 +198,9 @@ class CameraPage:
         self.pair_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self._update_clear()
         self.plan_btn.configure(state="normal" if self.kind == "bench" else "disabled")
+        if self._gone:
+            self._say("⚠ Not there any more (moved or renamed?): the " + "; the ".join(self._gone)
+                      + ". Pick it again.")
 
     # ---- inputs
     def refresh(self):
@@ -292,7 +303,11 @@ class CameraPage:
 
     def run_darks(self, folder: str | None = None):
         folder = folder or self.darks_var.get()
-        if not folder or not os.path.isdir(folder):
+        if folder and not os.path.isdir(folder):
+            self._say(f"⚠ The darks folder {folder} is not there any more (moved or renamed?): pick it again "
+                      "(Darks folder…).")
+            return
+        if not folder:
             self._say("⚠ Pick the folder of darks first (Darks folder…).")
             return
         bias_dir = self.bias_var.get() or None

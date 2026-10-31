@@ -32,9 +32,29 @@ SOURCES = (("SHOBS-P's on-sky logs (every night)", "logs"), ("A folder of lights
 SOURCE_WORDS = {k: w for w, k in SOURCES}
 COLORS = (("Green (TG)", "TG"), ("Red (TR)", "TR"), ("Blue (TB)", "TB"))
 COLOR_WORDS = {k: w for w, k in COLORS}
+COLOR_HINT = "for one-shot-color cameras; a mono camera uses its FILTER"
 FOCAL_TOL = 0.03                     # a log belongs to a setup when its focal length is within 3 % (plate solves)
 GREY = "#8a969c"
 OLD_RUN = "older run of this night (not counted)"
+
+
+TEL_FIELDS = ("name", "aperture_mm", "elevation_m", "lat", "lon")
+
+
+def same_focal(a, b) -> bool:
+    """Two focal lengths are one setup within 3 % (both unknown counts as the same)."""
+    a, b = sp._finite(a), sp._finite(b)
+    if not a or not b:
+        return not a and not b
+    return abs(a - b) <= FOCAL_TOL * max(a, b)
+
+
+def tel_entry(entries, cam, focal) -> dict | None:
+    """The Telescope boxes saved for one setup (camera id + focal length within 3 %), or None."""
+    for e in entries or []:
+        if isinstance(e, dict) and e.get("camera_id") == cam and same_focal(e.get("focal"), focal):
+            return e
+    return None
 
 
 def shobs_p_settings_path() -> str:
@@ -186,6 +206,25 @@ class SkyPage:
         self.elevation_var = tk.StringVar(value=_num(prefs.get("sky_elevation_m")) or _num(tel.get("elevation_m")))
         self.lat_var = tk.StringVar(value=_num(prefs.get("sky_lat")) or _num(tel.get("lat")))
         self.lon_var = tk.StringVar(value=_num(prefs.get("sky_lon")) or _num(tel.get("lon")))
+        # the Telescope boxes belong to ONE setup (camera + focal length) and are kept per setup, so a folder from
+        # another telescope never runs with this one's aperture and site. Older settings had one set: it belongs to
+        # the logs setup last run.
+        self._tel_owner = None           # (camera id, focal mm) the boxes hold now
+        self._folder_info = None         # the folder scan (camera id, focal, mono or color)
+        self._mono = False
+        self._scanning = None            # the folder being looked at (its setup decides the Telescope boxes)
+        self._color_keep = self.color_var.get()
+        if not isinstance(prefs.get("sky_telescopes"), list):
+            prefs["sky_telescopes"] = []
+            last = prefs.get("sky_setup")
+            if isinstance(last, (list, tuple)) and len(last) == 2 and any(
+                    prefs.get(k) not in (None, "") for k in ("sky_telescope_name", "sky_aperture_mm",
+                                                             "sky_elevation_m", "sky_lat", "sky_lon")):
+                prefs["sky_telescopes"].append({"camera_id": last[0], "focal": last[1] or None,
+                                                "name": prefs.get("sky_telescope_name") or "",
+                                                "aperture_mm": prefs.get("sky_aperture_mm"),
+                                                "elevation_m": prefs.get("sky_elevation_m"),
+                                                "lat": prefs.get("sky_lat"), "lon": prefs.get("sky_lon")})
         self.setup_var = tk.StringVar()
         self.logs_var = tk.StringVar()
         self.scan_var = tk.StringVar()
@@ -214,6 +253,7 @@ class SkyPage:
         srow.pack(anchor="w", fill=tk.X, pady=(px(app, 4), 0))
         ttk.Label(srow, text="Setup", style="Card.TLabel").pack(side=tk.LEFT)
         self.setup = ttk.Combobox(srow, textvariable=self.setup_var, state="readonly", width=62)
+        self.setup.bind("<<ComboboxSelected>>", lambda _e: self._follow_setup())
         self.setup.pack(side=tk.LEFT, padx=(px(app, 6), 0))
         self.folder_row = ttk.Frame(src, style="Card.TFrame")
         frow = ttk.Frame(self.folder_row, style="Card.TFrame")
@@ -227,8 +267,8 @@ class SkyPage:
         self.color = ttk.Combobox(crow, textvariable=self.color_var, state="readonly", width=12,
                                   values=[w for w, _k in COLORS])
         self.color.pack(side=tk.LEFT, padx=(px(app, 6), px(app, 8)))
-        ttk.Label(crow, text="for one-shot-color cameras; a mono camera uses its FILTER", style="Hint.TLabel").pack(
-            side=tk.LEFT)
+        self.color_hint = ttk.Label(crow, text=COLOR_HINT, style="Hint.TLabel")
+        self.color_hint.pack(side=tk.LEFT)
         self.scan_label = ttk.Label(self.folder_row, textvariable=self.scan_var, style="Hint.TLabel", justify=tk.LEFT)
         self.scan_label.pack(anchor="w", fill=tk.X, pady=(px(app, 4), 0))
         src.bind("<Configure>", lambda e: (self.logs_label.configure(wraplength=max(200, e.width - px(app, 20))),
@@ -345,6 +385,85 @@ class SkyPage:
         foot.pack(anchor="w", fill=tk.X, pady=(px(app, 4), 0))
         vf.bind("<Configure>", lambda e: foot.configure(wraplength=max(150, e.width - px(app, 8))), add="+")
         self.source_changed(save=False)
+        if self.mode == "folder" and self.folder_var.get() and os.path.isdir(self.folder_var.get()):
+            self.frame.after(300, lambda: self._scan_folder(self.folder_var.get()))
+
+    # ---- the Telescope boxes, one set per setup
+    def _vars(self):
+        return dict(zip(TEL_FIELDS, (self.name_var, self.aperture_var, self.elevation_var, self.lat_var,
+                                     self.lon_var)))
+
+    def _tel_store(self):
+        """Keep what the Telescope boxes say under the setup they belong to."""
+        own = self._tel_owner
+        if not own:
+            return
+        tels = self.app.prefs.setdefault("sky_telescopes", [])
+        e = tel_entry(tels, own[0], own[1])
+        if e is None:
+            e = {"camera_id": own[0], "focal": own[1]}
+            tels.append(e)
+        for k, var in self._vars().items():
+            t = var.get().strip()
+            e[k] = t if k == "name" else sp._finite(t.replace(",", "")) if t else None
+        settings.save(self.app.prefs)
+
+    def _tel_switch(self, cam, focal, from_logs: bool) -> tuple | None:
+        """Show the Telescope boxes of this setup (camera id + focal length). Returns the setup they held before
+        when that was ANOTHER setup (None when nothing changed or they belonged to no setup)."""
+        if not cam:
+            return None
+        focal = sp._finite(focal) or None
+        own = self._tel_owner
+        if own and own[0] == cam and same_focal(own[1], focal):
+            return None
+        if own is None:
+            # boxes nobody owns yet (first look): they are this setup's when its saved set matches or none is saved
+            e = tel_entry(self.app.prefs.get("sky_telescopes"), cam, focal)
+            if e is None and from_logs:
+                self._tel_owner = (cam, focal)
+                self._tel_store()
+                return None
+        self._tel_store()
+        e = tel_entry(self.app.prefs.get("sky_telescopes"), cam, focal)
+        vals = dict(e) if e else {}
+        if e is None:
+            try:
+                prof = sp.find_system_profile(cam, focal)
+            except Exception:
+                prof = None
+            t = (prof or {}).get("telescope") or {}
+            vals = {"name": t.get("name") or "", "aperture_mm": t.get("aperture_mm")}
+            if from_logs:                              # SHOBS-P's own settings describe the telescope its logs used
+                p = shobs_p_telescope()
+                for k in TEL_FIELDS:
+                    if vals.get(k) in (None, "") and p.get(k) not in (None, ""):
+                        vals[k] = p[k]
+        for k, var in self._vars().items():
+            v = vals.get(k)
+            var.set((v or "") if k == "name" else _num(v))
+        self._tel_owner = (cam, focal)
+        return own
+
+    def _follow_setup(self):
+        key = self._setup_key()
+        if key is not None and self.mode == "logs":
+            self._tel_switch(key[0], key[1] or None, from_logs=True)
+
+    def _set_mono(self, mono: bool, band=None):
+        """A mono folder measures the band its FILTER says: the Color choice is shown greyed with that band."""
+        if mono:
+            if self.color_var.get() in dict(COLORS):
+                self._color_keep = self.color_var.get()
+            self.color_var.set(f"From FILTER: {onsky.BAND_WORDS.get(band, band) if band else 'none'}")
+            self.color.configure(state="disabled")
+            self.color_hint.configure(text="mono camera: each frame's FILTER gives the band")
+        else:
+            if self.color_var.get() not in dict(COLORS):
+                self.color_var.set(self._color_keep if self._color_keep in dict(COLORS) else COLORS[0][0])
+            self.color.configure(state="readonly")
+            self.color_hint.configure(text=COLOR_HINT)
+        self._mono = mono
 
     # ---- inputs
     @property
@@ -373,6 +492,10 @@ class SkyPage:
             self.app.prefs["sky_source"] = self.mode
             settings.save(self.app.prefs)
             self._say("")
+            if self.mode == "logs":
+                self._follow_setup()
+            elif self._folder_info:
+                self._folder_setup(self._folder_info)
 
     def scan_logs(self) -> list:
         """Read what each log says about its setup (cached by size and time), fill the Setup drop-down."""
@@ -406,6 +529,8 @@ class SkyPage:
             want = self.app.prefs.get("sky_setup")
             pick = next((lab for k, lab, _n, _p in self._setups if list(k) == want), None)
             self.setup_var.set(pick or (labels[0] if labels else ""))
+        if self.mode == "logs":
+            self._follow_setup()
         return infos
 
     def _setup_key(self):
@@ -425,7 +550,28 @@ class SkyPage:
         self.folder_var.set(folder)
         self.app.prefs["sky_folder"] = folder
         settings.save(self.app.prefs)
+        self._scan_folder(folder)
+
+    def _folder_setup(self, info) -> None:
+        """The folder's setup takes the Telescope boxes (and the Color choice); a different telescope is said."""
+        get = info.get if isinstance(info, dict) else (lambda k, d=None: getattr(info, k, d))
+        if get("osc") is not None:
+            self._set_mono(get("osc") is False, get("band"))
+        was = self._tel_switch(get("camera_id"), get("focal"), from_logs=False)
+        if was is not None:
+            f_new, f_old = sp._finite(get("focal")), sp._finite(was[1])
+            what = (f"shot at {f_new:,.0f} mm" if f_new else "from a setup with no focal length in its headers")
+            old = f"{f_old:,.0f} mm" if f_old else "the other"
+            name = self.name_var.get().strip()
+            self._say(f"⚠ This folder was {what}, not with the {old} setup the Telescope boxes held: they now show "
+                      + (f"this setup's own values ({name})." if name else
+                         "this setup's own values, empty until you type them (its aperture and site elevation, "
+                         "for scintillation)."))
+
+    def _scan_folder(self, folder: str):
         self.scan_var.set("")
+        self._folder_info = None
+        self._scanning = folder
 
         def work(step):
             step(f"Looking at {os.path.basename(folder)}")
@@ -433,10 +579,17 @@ class SkyPage:
             return sky_folder.scan(folder)
 
         def done(info, exc):
+            if self._scanning == folder:
+                self._scanning = None
             if exc is not None:
                 self.scan_var.set(f"⚠ The folder could not be looked at: {self._why(exc)}.")
                 return
             self.scan_var.set(scan_line(info))
+            if folder != self.folder_var.get():
+                return                                   # another folder was picked meanwhile
+            self._folder_info = info
+            if self.mode == "folder":
+                self._folder_setup(info)
 
         self.app.jobs.run(work, done, "Looking at the folder of lights")
 
@@ -490,8 +643,10 @@ class SkyPage:
         p["sky_aperture_mm"] = aperture
         p["sky_elevation_m"] = elevation
         p["sky_source"] = self.mode
-        p["sky_color"] = self.channel
+        if not self._mono:
+            p["sky_color"] = self.channel
         settings.save(p)
+        self._tel_store()
 
     # ---- the run
     def run(self):
@@ -506,6 +661,10 @@ class SkyPage:
             folder = self.folder_var.get()
             if not folder or not os.path.isdir(folder):
                 self._say("⚠ Pick the folder of lights first (Folder of lights…).")
+                return
+            if self._scanning == folder:
+                self._say("⚠ Still looking at the folder (which telescope and camera it is from): Run again in a "
+                          "moment.")
                 return
             channel = self.channel
             site = self._site()
@@ -602,7 +761,7 @@ class SkyPage:
             except tk.TclError:
                 pass
         try:
-            self.color.configure(state="readonly")
+            self.color.configure(state="disabled" if self._mono else "readonly")
         except tk.TclError:
             pass
 
@@ -628,6 +787,9 @@ class SkyPage:
         if exc is not None:
             return self._failed(exc)
         self._idle()
+        if res.source == "folder" and res.key and self._tel_owner is None:
+            self._tel_owner = (res.key[0], res.key[1] or None)      # the boxes ran with this setup: keep them there
+            self._tel_store()
         self.scan_logs()
         if res.summary is None:                         # a folder run that gave no night to learn from
             self.run_res = res
@@ -695,6 +857,7 @@ class SkyPage:
             self.name_var.set(name)
             self.app.prefs["sky_telescope_name"] = name
             settings.save(self.app.prefs)
+            self._tel_store()
         if not name:
             return None
         return sp.system_id(name, focal_of(res.datasets), camera_of(res))
@@ -963,7 +1126,7 @@ def night_row(r, s) -> tuple:
     if not status and why and r.photometric:
         status = f"⚠ set aside: {why}"
     return (ds.night, ds.target, ds.band, r.n_frames or len(ds.jd), _from(ds), _fmt(r.zp1, 3), k,
-            "✔" if r.photometric else "—", see, _fmt(r.sky_mag, 2), _fmt(r.cy, 2), _fmt(r.overhead_s, 1),
+            ("marginal" if r.marginal else "✔") if r.photometric else "—", see, _fmt(r.sky_mag, 2), _fmt(r.cy, 2), _fmt(r.overhead_s, 1),
             status or "used")
 
 

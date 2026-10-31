@@ -72,6 +72,7 @@ BIN_DAYS = 10.0 / 1440.0      # 10-minute bins for the photometric test
 PHOT_BIN_RMS = 0.025          # binned residual rms (mag) a photometric night stays within
 MIN_BINS = 3                  # a night needs this many bins before it can be called photometric
 PHOT_BIN_RANGE = 0.05         # and the lowest to the highest 10-minute bin (mag): haze coming or going
+TREND_MAG = 0.03              # a steady climb or fall of the zero point across the night this big makes it MARGINAL
 K_MIN_SPAN = 0.25             # airmass span a night needs to measure extinction
 K_RANGE = (0.0, 1.0)          # a physical extinction coefficient
 DEFOCUS_ARCSEC = 7.0          # a night's median FWHM above this is defocused
@@ -161,6 +162,8 @@ class NightResult:
     bin_rms: float = float("nan")                      # 10-minute binned residual rms
     bin_range: float = float("nan")                    # lowest to highest 10-minute bin
     photometric: bool = False
+    trend: float = float("nan")                        # the zero point's straight-line change, first frame to last
+    marginal: bool = False                             # photometric by the bins, but drifting by ≥ TREND_MAG
     too_short: bool = False                            # under MIN_BINS time bins: the sky could not be judged
     fwhm_arcsec: float = float("nan")
     fwhm_sigma: float = float("nan")
@@ -637,6 +640,15 @@ def analyse(ds: Dataset, k_prior: tuple | None = None, aperture_mm: float | None
         res.zp1_sigma = max(res.rms / math.sqrt(keep.sum()), ZP_FLOOR) + 0.02 * abs(res.x_mean - 1.0)
     rms = res.rms
     res.usable = True
+    # a slow, steady change (haze clearing or coming) can stay inside the bin limits and still move the zero point
+    resid_all = resid if k_ok else r
+    use = ok & keep
+    if use.sum() >= MIN_FRAMES:
+        t = ds.jd[use] - float(np.min(ds.jd[use]))
+        if float(np.ptp(t)) > 0:
+            slope = float(np.polyfit(t, resid_all[use], 1)[0])
+            res.trend = slope * float(np.ptp(t))
+    res.marginal = bool(res.photometric and math.isfinite(res.trend) and abs(res.trend) >= TREND_MAG)
 
     # findings
     if nbins < MIN_BINS:
@@ -646,9 +658,14 @@ def analyse(ds: Dataset, k_prior: tuple | None = None, aperture_mm: float | None
                           f"10 minutes ({MIN_BINS} needed). Kept out of the zero point and extinction; seeing, sky, "
                           "scintillation and cadence still count."))
     else:
-        L.append(("ok" if res.photometric else "warn",
+        L.append(("ok" if res.photometric and not res.marginal else "warn",
                   (f"✔ Photometric: the zero point held within {res.bin_range:.3f} mag across {nbins} time bins "
                    f"(rms {res.bin_rms:.3f})."
+                   if res.photometric and not res.marginal else
+                   f"⚠ Marginal: the zero point held within {res.bin_range:.3f} mag in time bins (rms "
+                   f"{res.bin_rms:.3f}) but {'climbed' if res.trend > 0 else 'fell'} steadily by {abs(res.trend):.3f} "
+                   f"mag from the first frame to the last (limit {TREND_MAG}): the sky was clearing or hazing. Used "
+                   "for the zero point and extinction only when no clean photometric night is there."
                    if res.photometric else
                    f"⚠ Not photometric: the zero point moved {res.bin_range:.3f} mag across the night in time bins "
                    f"(rms {res.bin_rms:.3f}; limits {PHOT_BIN_RANGE} and {PHOT_BIN_RMS}): clouds or haze. Kept out of "
@@ -857,6 +874,7 @@ class BandSummary:
     fwhm_in_focus_sigma: float = float("nan")
     fwhm_in_focus_n: int = 0
     fwhm_defocus: dict = field(default_factory=dict)    # key → (value, sigma, n)
+    zp_marginal_only: bool = False                      # the zero point rests on marginal (drifting) nights only
     sky: float = float("nan")
     sky_sigma: float = float("nan")
     sky_n: int = 0
@@ -896,13 +914,26 @@ def _by_night(results, value, sigma):
     return out
 
 
-def _defocus_keys(results: list) -> None:
-    """Defocused runs keyed by the focuser offset from the same night's in-focus run (else "defocused")."""
+def _defocus_keys(results: list, profile: dict | None = None) -> None:
+    """Defocused runs keyed by the focuser offset from the same night's in-focus run (else "defocused").
+
+    A run alone on its night has no in-focus partner to compare with. It is judged against the setup's own seeing
+    instead of a flat 7″: the in-focus FWHM of the other nights (else the system profile's) and the size of each
+    known defocus ("+125 steps"). Whichever it is nearest (in ratio) decides: a known defocus within 25 % names it,
+    in focus keeps it in focus, and only with nothing to compare against does the flat DEFOCUS_ARCSEC rule stand."""
     nights: dict = {}
     for r in results:
         if math.isfinite(r.fwhm_arcsec):
             nights.setdefault(r.ds.night, []).append(r)
+    paired = set()                                       # runs judged against a same-night partner
     for rs in nights.values():
+        # a poor-seeing site: the night's sharpest run is over the flat 7″ but a run far larger (a real defocus)
+        # shows it was in focus
+        low = min(r.fwhm_arcsec for r in rs)
+        if len(rs) > 1 and any(r.fwhm_arcsec > DEFOCUS_RATIO * low for r in rs):
+            for r in rs:
+                if r.fwhm_arcsec <= 1.25 * low:
+                    r.defocused = False
         infocus = [r for r in rs if not r.defocused]
         best = min((r.fwhm_arcsec for r in infocus), default=float("nan"))
         for r in rs:
@@ -916,8 +947,54 @@ def _defocus_keys(results: list) -> None:
             if ref and math.isfinite(r.focus):
                 off = r.focus - float(np.median(ref))
                 r.defocus_key = f"{int(round(off / 5.0) * 5):+d} steps"
+                paired.add(id(r))
+                paired.update(id(q) for q in infocus)
             else:
                 r.defocus_key = "defocused"
+    # the setup's own sizes, per band: in focus and each defocus keyed by its offset
+    pbands = (profile or {}).get("bands") or {}
+
+    def refs(band, me):
+        inf = [q.fwhm_arcsec for q in results if q is not me and q.ds.band == band and not q.defocused
+               and math.isfinite(q.fwhm_arcsec) and id(q) in paired]
+        if not inf:
+            inf = [q.fwhm_arcsec for q in results if q is not me and q.ds.band == band and not q.defocused
+                   and math.isfinite(q.fwhm_arcsec)]
+        f0 = float(np.median(inf)) if inf else sp._finite(sp.value_of((pbands.get(band) or {}).get("fwhm_in_focus")))
+        keys: dict = {}
+        for q in results:
+            if q is not me and q.ds.band == band and q.defocused and q.defocus_key.endswith("steps"):
+                keys.setdefault(q.defocus_key, []).append(q.fwhm_arcsec)
+        known = {k: float(np.median(v)) for k, v in keys.items()}
+        for k, rec in ((pbands.get(band) or {}).get("fwhm_defocus") or {}).items():
+            v = sp._finite(sp.value_of(rec))
+            if k.endswith("steps") and v and k not in known:
+                known[k] = v
+        return f0, known
+
+    lone = [r for r in results if math.isfinite(r.fwhm_arcsec) and id(r) not in paired
+            and len(nights.get(r.ds.night, [])) == 1]
+    judged = [(r, *refs(r.ds.band, r)) for r in lone]      # every lone run against the same references
+    for r, f0, known in judged:
+        if not f0 and not known:
+            continue                                       # nothing to compare with: the flat rule stands
+        f = r.fwhm_arcsec
+        cands = ([(abs(math.log(f / f0)), "")] if f0 else []) + [(abs(math.log(f / v)), k) for k, v in known.items()]
+        d, key = min(cands)
+        was = r.defocused
+        if key and d <= math.log(1.25):
+            r.defocused, r.defocus_key = True, key
+            r.lines.append(("info", f"Defocus taken as {key}: no in-focus run that night to measure it from, and its "
+                                    f"stars ({f:.2f}″) are the size of your {key} nights ({known[key]:.2f}″)"
+                                    + (f" rather than your in-focus seeing ({f0:.2f}″)." if f0 else ".")))
+        elif not key:
+            r.defocused, r.defocus_key = False, ""
+            if was:
+                r.lines.append(("info", f"In focus: its stars ({f:.2f}″) are nearer your in-focus seeing "
+                                        f"({f0:.2f}″) than any defocus you use, so the flat {DEFOCUS_ARCSEC:g}″ "
+                                        "rule does not apply."))
+        else:
+            r.defocused, r.defocus_key = True, "defocused"
     # a defocused night with no in-focus run to measure the offset from: when it is the size of a defocus already
     # keyed by its offset in the same band (within 25 %), it is taken to be that one (said in its findings)
     known: dict = {}
@@ -939,7 +1016,7 @@ def _defocus_keys(results: list) -> None:
 
 def combine(results: list, replaced: list | None = None, old_profile: dict | None = None) -> Summary:
     """The nights together, per band (see the module text)."""
-    _defocus_keys(results)
+    _defocus_keys(results, old_profile)
     usable = [r for r in results if r.usable]
     bands: dict = {}
     for r in usable:
@@ -949,7 +1026,10 @@ def combine(results: list, replaced: list | None = None, old_profile: dict | Non
         bs = BandSummary(band=band)
         bs.last_night = max((r.ds.night for r in rs), default="")
         # extinction first (the zero point of nights without their own k uses it)
-        kn = _by_night([r for r in rs if math.isfinite(r.k)], lambda r: r.k, lambda r: r.k_sigma)
+        k_rs = [r for r in rs if math.isfinite(r.k)]
+        if any(not r.marginal for r in k_rs):              # marginal nights only when nothing cleaner measured k
+            k_rs = [r for r in k_rs if not r.marginal]
+        kn = _by_night(k_rs, lambda r: r.k, lambda r: r.k_sigma)
         if kn:
             keep = clipped([v for _, v, _, _ in kn], [s for _, _, s, _ in kn])
             bs.k, bs.k_sigma = wmean([v for (_, v, _, _), k in zip(kn, keep) if k],
@@ -967,8 +1047,16 @@ def combine(results: list, replaced: list | None = None, old_profile: dict | Non
             if math.isfinite(r.zp1) and not r.photometric:
                 bs.zp_out[f"{r.ds.night} {r.ds.target}"] = ("too short to judge the sky" if r.too_short else
                                                             "not photometric (clouds or haze)")
-        zn = _by_night([r for r in rs if r.photometric and math.isfinite(r.zp1)], lambda r: r.zp1,
-                       lambda r: r.zp1_sigma)
+        phot = [r for r in rs if r.photometric and math.isfinite(r.zp1)]
+        if any(not r.marginal for r in phot):              # a drifting night is set aside when a clean one is there
+            for r in phot:
+                if r.marginal:
+                    bs.zp_out[f"{r.ds.night} {r.ds.target}"] = (f"marginal: the zero point drifted {r.trend:+.3f} mag "
+                                                                "through the night")
+            phot = [r for r in phot if not r.marginal]
+        elif phot:
+            bs.zp_marginal_only = True
+        zn = _by_night(phot, lambda r: r.zp1, lambda r: r.zp1_sigma)
         if zn:
             keep = clipped([v for _, v, _, _ in zn], [s for _, _, s, _ in zn])
             for (n, v, _, _), k in zip(zn, keep):
@@ -1078,7 +1166,9 @@ def measured_records(s: Summary, run_key: str | None = None) -> tuple[dict, dict
             recs["zero_point"] = sp.record(
                 _rnd(b.zp1, 3), "mag for 1 e-/s", "measured", sigma=_rnd(b.zp1_sigma, 3), n=len(b.zp_nights),
                 date=max(b.zp_nights), conditions=_nights_word(b.zp_nights), run=run_key,
-                note="at airmass 1; photometric nights only; catalogued field stars from " + _catalog_words(s, band))
+                note="at airmass 1; " + ("marginal (drifting) nights only: no clean photometric night yet; "
+                                      if b.zp_marginal_only else "photometric nights only; ")
+                     + "catalogued field stars from " + _catalog_words(s, band))
         if math.isfinite(b.k):
             recs["extinction_k"] = sp.record(_rnd(b.k, 3), "mag/airmass", "measured", sigma=_rnd(b.k_sigma, 3),
                                              n=len(b.k_nights), date=max(b.k_nights),
@@ -1237,7 +1327,7 @@ def night_summary(r: NightResult) -> dict:
             "written_by": r.ds.written_by, "frames": r.n_frames, "stars_used": r.stars_used,
             "stars_out": r.stars_out, "zp1": n(r.zp1), "zp1_sigma": n(r.zp1_sigma), "zp_at_x": n(r.zp_mean),
             "x_mean": n(r.x_mean, 3), "k": n(r.k), "k_used": n(r.k_used), "k_used_source": r.k_used_source,
-            "photometric": r.photometric, "bin_rms": n(r.bin_rms), "fwhm_arcsec": n(r.fwhm_arcsec, 3),
+            "photometric": r.photometric, "marginal": r.marginal, "trend": n(r.trend), "bin_rms": n(r.bin_rms), "fwhm_arcsec": n(r.fwhm_arcsec, 3),
             "defocus": r.defocus_key if r.defocused else "", "sky": n(r.sky_mag, 3), "moon": n(r.moon_illum, 3),
             "cy": n(r.cy, 3), "overhead_s": n(r.overhead_s, 3), "why_not": r.why_not,
             "worst": worst if worst else ("⚠ not photometric" if r.usable and not r.photometric else "")}

@@ -226,7 +226,8 @@ def scan(folder: str) -> dict:
     "others" {kind: count}, "osc" (True / False), "bayer", "filters" {FILTER: count}, "bands" {band: count},
     "band" (mono: the band a run measures; None for color, where the page's color choice decides),
     "n_wcs" (lights with a plate solution), "has_wcs" = "solved" (all of them), "has_pointing", "target", "night",
-    "exposures" [s], "camera", "lines" [(kind, text)]}. SkyFolderError when there are no light frames."""
+    "exposures" [s], "camera", "camera_id" (the setup's camera id), "focal" (median FOCALLEN, mm, or None),
+    "lines" [(kind, text)]}. SkyFolderError when there are no light frames."""
     if not folder or not os.path.isdir(folder):
         raise SkyFolderError("That folder is not there.")
     files = fr.list_frames(folder)
@@ -250,6 +251,10 @@ def scan(folder: str) -> dict:
     exps = sorted({round(e, 3) for e in (fr.exptime_of(h) for h in heads) if e is not None})
     cam = Counter(_str(h, "INSTRUME") or "unknown camera" for h in heads).most_common(1)[0][0]
     pointing = any(pointing_of(h) for h in heads[:3])
+    keys = [sp.setup_key(h) for h in heads]
+    cam_id = Counter(k["camera_id"] for k in keys).most_common(1)[0][0]
+    focals = sorted(f for f in (k.get("focal_mm") for k in keys if k["camera_id"] == cam_id) if f)
+    focal = float(focals[len(focals) // 2]) if focals else None
     lines = [("info", f"{len(lights)} light frame{'s' if len(lights) != 1 else ''} of {target} from {cam} "
                       f"({'color, ' + bayer if osc else 'mono'})" + (f", night of {night}" if night else "") + ".")]
     if others:
@@ -268,7 +273,7 @@ def scan(folder: str) -> dict:
             "bayer": None if not osc else bayer, "filters": dict(filters), "bands": dict(bands),
             "band": None if osc else bands.most_common(1)[0][0], "n_wcs": n_wcs, "has_wcs": n_wcs == len(heads),
             "solved": n_wcs == len(heads), "has_pointing": bool(pointing), "target": target, "night": night,
-            "exposures": exps, "camera": cam, "lines": lines}
+            "exposures": exps, "camera": cam, "camera_id": cam_id, "focal": focal, "lines": lines}
 
 
 # ---- matching -------------------------------------------------------------------------------------------------------
