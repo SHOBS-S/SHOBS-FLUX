@@ -640,14 +640,21 @@ def analyse(ds: Dataset, k_prior: tuple | None = None, aperture_mm: float | None
         res.zp1_sigma = max(res.rms / math.sqrt(keep.sum()), ZP_FLOOR) + 0.02 * abs(res.x_mean - 1.0)
     rms = res.rms
     res.usable = True
-    # a slow, steady change (haze clearing or coming) can stay inside the bin limits and still move the zero point
-    resid_all = resid if k_ok else r
-    use = ok & keep
+    # a slow, steady change (haze clearing or coming) can stay inside the bin limits and still move the zero point.
+    # Where this night's own k was fitted, a drift along a one-way airmass track hides in k, so the night is also
+    # judged with the profile's measured k (when there is one): the larger drift counts.
+    tracks = [resid if k_ok else r]
+    if k_ok and prior_measured:
+        flat_p = zf + k_prior[0] * (x - 1.0)
+        tracks.append(flat_p - np.nanmean(flat_p[ok & keep]))
+    use = ok & keep & np.isfinite(ds.jd)
     if use.sum() >= MIN_FRAMES:
         t = ds.jd[use] - float(np.min(ds.jd[use]))
-        if float(np.ptp(t)) > 0:
-            slope = float(np.polyfit(t, resid_all[use], 1)[0])
-            res.trend = slope * float(np.ptp(t))
+        span = float(np.ptp(t))
+        if span > 0:
+            got = [float(np.polyfit(t, tr[use], 1)[0]) * span for tr in tracks if np.isfinite(tr[use]).all()]
+            if got:
+                res.trend = max(got, key=abs)
     res.marginal = bool(res.photometric and math.isfinite(res.trend) and abs(res.trend) >= TREND_MAG)
 
     # findings
@@ -664,7 +671,8 @@ def analyse(ds: Dataset, k_prior: tuple | None = None, aperture_mm: float | None
                    if res.photometric and not res.marginal else
                    f"⚠ Marginal: the zero point held within {res.bin_range:.3f} mag in time bins (rms "
                    f"{res.bin_rms:.3f}) but {'climbed' if res.trend > 0 else 'fell'} steadily by {abs(res.trend):.3f} "
-                   f"mag from the first frame to the last (limit {TREND_MAG}): the sky was clearing or hazing. Used "
+                   f"mag from the first frame to the last (limit {TREND_MAG}): the sky was "
+                   f"{'clearing' if res.trend > 0 else 'hazing over'}. Used "
                    "for the zero point and extinction only when no clean photometric night is there."
                    if res.photometric else
                    f"⚠ Not photometric: the zero point moved {res.bin_range:.3f} mag across the night in time bins "
@@ -924,7 +932,7 @@ def _defocus_keys(results: list, profile: dict | None = None) -> None:
     nights: dict = {}
     for r in results:
         if math.isfinite(r.fwhm_arcsec):
-            nights.setdefault(r.ds.night, []).append(r)
+            nights.setdefault((r.ds.night, r.ds.band), []).append(r)     # one band's runs judged together
     paired = set()                                       # runs judged against a same-night partner
     for rs in nights.values():
         # a poor-seeing site: the night's sharpest run is over the flat 7″ but a run far larger (a real defocus)
@@ -954,27 +962,35 @@ def _defocus_keys(results: list, profile: dict | None = None) -> None:
     # the setup's own sizes, per band: in focus and each defocus keyed by its offset
     pbands = (profile or {}).get("bands") or {}
 
+    def pos(v):
+        v = sp._finite(v)
+        return v if v and v > 0 else None
+
     def refs(band, me):
+        # in focus: runs proven in focus by a same-night defocus partner first, then the profile; runs that are
+        # themselves unproven count only when there is nothing else (they cannot vouch for each other otherwise)
         inf = [q.fwhm_arcsec for q in results if q is not me and q.ds.band == band and not q.defocused
                and math.isfinite(q.fwhm_arcsec) and id(q) in paired]
-        if not inf:
+        f0 = float(np.median(inf)) if inf else pos(sp.value_of((pbands.get(band) or {}).get("fwhm_in_focus")))
+        if not f0:
             inf = [q.fwhm_arcsec for q in results if q is not me and q.ds.band == band and not q.defocused
                    and math.isfinite(q.fwhm_arcsec)]
-        f0 = float(np.median(inf)) if inf else sp._finite(sp.value_of((pbands.get(band) or {}).get("fwhm_in_focus")))
+            f0 = float(np.median(inf)) if inf else None
         keys: dict = {}
         for q in results:
             if q is not me and q.ds.band == band and q.defocused and q.defocus_key.endswith("steps"):
                 keys.setdefault(q.defocus_key, []).append(q.fwhm_arcsec)
         known = {k: float(np.median(v)) for k, v in keys.items()}
         for k, rec in ((pbands.get(band) or {}).get("fwhm_defocus") or {}).items():
-            v = sp._finite(sp.value_of(rec))
+            v = pos(sp.value_of(rec))
             if k.endswith("steps") and v and k not in known:
                 known[k] = v
         return f0, known
 
-    lone = [r for r in results if math.isfinite(r.fwhm_arcsec) and id(r) not in paired
-            and len(nights.get(r.ds.night, [])) == 1]
-    judged = [(r, *refs(r.ds.band, r)) for r in lone]      # every lone run against the same references
+    # every run with no same-night partner (alone on its night, or with no focuser position to pair by) is judged
+    # against the setup's own sizes, all against the same references
+    lone = [r for r in results if math.isfinite(r.fwhm_arcsec) and r.fwhm_arcsec > 0 and id(r) not in paired]
+    judged = [(r, *refs(r.ds.band, r)) for r in lone]
     for r, f0, known in judged:
         if not f0 and not known:
             continue                                       # nothing to compare with: the flat rule stands
@@ -991,8 +1007,8 @@ def _defocus_keys(results: list, profile: dict | None = None) -> None:
             r.defocused, r.defocus_key = False, ""
             if was:
                 r.lines.append(("info", f"In focus: its stars ({f:.2f}″) are nearer your in-focus seeing "
-                                        f"({f0:.2f}″) than any defocus you use, so the flat {DEFOCUS_ARCSEC:g}″ "
-                                        "rule does not apply."))
+                                        f"({f0:.2f}″)" + (" than any defocus you use" if known else "")
+                                        + f", so the flat {DEFOCUS_ARCSEC:g}″ rule does not apply."))
         else:
             r.defocused, r.defocus_key = True, "defocused"
     # a defocused night with no in-focus run to measure the offset from: when it is the size of a defocus already
@@ -1028,6 +1044,10 @@ def combine(results: list, replaced: list | None = None, old_profile: dict | Non
         # extinction first (the zero point of nights without their own k uses it)
         k_rs = [r for r in rs if math.isfinite(r.k)]
         if any(not r.marginal for r in k_rs):              # marginal nights only when nothing cleaner measured k
+            for r in k_rs:
+                if r.marginal:
+                    bs.zp_out[f"{r.ds.night} {r.ds.target}"] = (f"marginal: the zero point drifted {r.trend:+.3f} "
+                                                                "mag through the night (left out of the extinction)")
             k_rs = [r for r in k_rs if not r.marginal]
         kn = _by_night(k_rs, lambda r: r.k, lambda r: r.k_sigma)
         if kn:
@@ -1052,7 +1072,8 @@ def combine(results: list, replaced: list | None = None, old_profile: dict | Non
             for r in phot:
                 if r.marginal:
                     bs.zp_out[f"{r.ds.night} {r.ds.target}"] = (f"marginal: the zero point drifted {r.trend:+.3f} mag "
-                                                                "through the night")
+                                                                "through the night (left out of the zero point"
+                                                                + (" and extinction)" if math.isfinite(r.k) else ")"))
             phot = [r for r in phot if not r.marginal]
         elif phot:
             bs.zp_marginal_only = True

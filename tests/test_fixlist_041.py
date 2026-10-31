@@ -94,6 +94,8 @@ class TestDefocus(TempData):
         lone = seeing_run("2026-10-29", 7.8, 6300, seed=3)
         self.assertTrue(lone.defocused)                          # the flat rule first
         onsky.combine([a, b, lone])
+        self.assertFalse(a.defocused)                            # the night's sharpest run, over 7″ but in focus
+        self.assertEqual(b.defocus_key, "+125 steps")
         self.assertFalse(lone.defocused)
         self.assertTrue(any("does not apply" in t for _k, t in lone.lines))
 
@@ -106,6 +108,41 @@ class TestDefocus(TempData):
         lone2 = seeing_run("2026-10-29", 6.8, 6300, seed=3)
         onsky.combine([lone2])                                   # no reference at all: the flat 7″ rule stands
         self.assertFalse(lone2.defocused)
+
+
+    def test_unproven_nights_do_not_vouch_for_each_other(self):
+        prof = {"bands": {"TG": {"fwhm_in_focus": sp.record(3.5, "arcsec", "measured"),
+                                 "fwhm_defocus": {"+125 steps": sp.record(7.6, "arcsec", "measured")}}}}
+        a = seeing_run("2026-10-29", 6.8, 6300, seed=3)
+        b = seeing_run("2026-10-30", 6.9, 6310, seed=4)
+        onsky.combine([a, b], None, prof)
+        self.assertEqual((a.defocus_key, b.defocus_key), ("+125 steps", "+125 steps"))
+
+    def test_two_in_focus_runs_on_a_poor_night(self):
+        prof = {"bands": {"TG": {"fwhm_in_focus": sp.record(7.4, "arcsec", "measured")}}}
+        a = seeing_run("2026-10-29", 7.5, 6300, "Star A", 3)
+        b = seeing_run("2026-10-29", 7.6, 6300, "Star B", 4)
+        self.assertTrue(a.defocused and b.defocused)            # the flat rule
+        onsky.combine([a, b], None, prof)
+        self.assertFalse(a.defocused or b.defocused)
+
+    def test_bad_profile_value_does_not_crash(self):
+        prof = {"bands": {"TG": {"fwhm_in_focus": sp.record(-1.0, "arcsec", "user"),
+                                 "fwhm_defocus": {"+125 steps": sp.record(0.0, "arcsec", "user")}}}}
+        lone = seeing_run("2026-10-29", 6.8, 6300, seed=3)
+        onsky.combine([lone], None, prof)
+        self.assertFalse(lone.defocused)
+
+
+class TestTrendWithFittedK(TempData):
+    def test_drift_along_the_airmass_track_is_caught_by_the_profile_k(self):
+        doc, _t = synth_sky.make_log(airmass=(1.05, 1.6), haze_mag=0.04, seed=7)
+        free = onsky.analyse(onsky.load_dataset(doc, lookup), None, 356, 300)
+        self.assertTrue(free.photometric and not free.marginal)     # the free k soaks the haze up
+        withk = onsky.analyse(onsky.load_dataset(doc, lookup), (0.20, "profile"), 356, 300)
+        self.assertTrue(withk.photometric, withk.lines)
+        self.assertTrue(withk.marginal, (withk.trend, withk.k))
+        self.assertTrue(any("hazing over" in t for _k, t in withk.lines))
 
 
 class TestDateAxis(unittest.TestCase):
@@ -198,7 +235,39 @@ class TestTelescopePerSetup(_AppCase):
         self.assertEqual((page.aperture_var.get(), page.elevation_var.get()), ("1000", "276"))
         tels = self.app.prefs["sky_telescopes"]
         self.assertEqual(len(tels), 2)
-        self.assertNotEqual(self.app.prefs.get("sky_color"), "SI")
+
+    def test_folder_only_user_keeps_the_boxes(self):
+        import sky_page
+        self.start({"sky_telescope_name": "Backyard 8in", "sky_aperture_mm": 203, "sky_elevation_m": 150,
+                    "sky_lat": 40.1, "sky_lon": -75.2, "sky_source": "folder"})
+        page = self.app.sky_page
+        page._folder_setup({"osc": True, "camera_id": "cam-x", "focal": 1000.0})
+        self.assertEqual((page.name_var.get(), page.aperture_var.get(), page.lat_var.get()),
+                         ("Backyard 8in", "203", "40.1"))
+        self.assertEqual(self.app.prefs["sky_telescopes"][0]["aperture_mm"], 203.0)
+
+    def test_failed_scan_refuses_the_run(self):
+        import sky_page
+
+        def scan(_f):
+            raise RuntimeError("unreadable")
+        folder = self.path("odd")
+        os.makedirs(folder)
+        self.start({"sky_source": "folder"})
+        page = self.app.sky_page
+        with mock.patch.dict(sys.modules, {"sky_folder": types.SimpleNamespace(scan=scan)}):
+            page.set_folder(folder)
+            self.assertTrue(self.app.jobs.wait(30))
+            self.app.update()
+            page.run()
+        self.assertIn("could not look at this folder", page.msg_var.get())
+
+    def test_mono_run_keeps_the_color_choice(self):
+        self.start({"sky_color": "TR", "sky_source": "folder"})
+        page = self.app.sky_page
+        page._set_mono(True, "SI")
+        page._save_prefs(None, None)
+        self.assertEqual(self.app.prefs["sky_color"], "TR")
 
     def test_color_folder_restores_choice(self):
         import sky_page

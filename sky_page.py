@@ -212,6 +212,7 @@ class SkyPage:
         self._tel_owner = None           # (camera id, focal mm) the boxes hold now
         self._folder_info = None         # the folder scan (camera id, focal, mono or color)
         self._mono = False
+        self._scan_failed = None         # a folder whose look failed: its telescope is not known
         self._scanning = None            # the folder being looked at (its setup decides the Telescope boxes)
         self._color_keep = self.color_var.get()
         if not isinstance(prefs.get("sky_telescopes"), list):
@@ -419,8 +420,10 @@ class SkyPage:
             return None
         if own is None:
             # boxes nobody owns yet (first look): they are this setup's when its saved set matches or none is saved
+            # (or, on the very first look when no setup has boxes saved yet, whatever setup comes first: older
+            # settings had one set and nothing else to say whose it was)
             e = tel_entry(self.app.prefs.get("sky_telescopes"), cam, focal)
-            if e is None and from_logs:
+            if e is None and (from_logs or not self.app.prefs.get("sky_telescopes")):
                 self._tel_owner = (cam, focal)
                 self._tel_store()
                 return None
@@ -572,6 +575,7 @@ class SkyPage:
         self.scan_var.set("")
         self._folder_info = None
         self._scanning = folder
+        self._scan_failed = None
 
         def work(step):
             step(f"Looking at {os.path.basename(folder)}")
@@ -583,6 +587,8 @@ class SkyPage:
                 self._scanning = None
             if exc is not None:
                 self.scan_var.set(f"⚠ The folder could not be looked at: {self._why(exc)}.")
+                if folder == self.folder_var.get():
+                    self._scan_failed = folder
                 return
             self.scan_var.set(scan_line(info))
             if folder != self.folder_var.get():
@@ -650,6 +656,8 @@ class SkyPage:
 
     # ---- the run
     def run(self):
+        # the logs are looked at FIRST: that can change the setup, and with it the Telescope boxes read below
+        infos = self.scan_logs() if self.mode == "logs" else []
         try:
             aperture, elevation = self._numbers()
         except ValueError as exc:
@@ -666,6 +674,10 @@ class SkyPage:
                 self._say("⚠ Still looking at the folder (which telescope and camera it is from): Run again in a "
                           "moment.")
                 return
+            if self._scan_failed == folder:
+                self._say("⚠ Not run: FLUX could not look at this folder, so it cannot tell which telescope the "
+                          "Telescope boxes should be for. Pick the folder again (Folder of lights…).")
+                return
             channel = self.channel
             site = self._site()
             self._busy()
@@ -675,7 +687,6 @@ class SkyPage:
 
             self.app.jobs.run(work, self.done, f"On-sky run on {os.path.basename(folder)}")
             return
-        infos = self.scan_logs()
         key = self._setup_key()
         if key is None:
             self._say(f"⚠ No on-sky logs to learn from yet in {sp.onsky_dir(make=False)}. SHOBS-P 2.2.19.1 and "
