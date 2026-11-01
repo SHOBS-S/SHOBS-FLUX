@@ -79,7 +79,7 @@ class TestOnskyFiles(TempData):
         con = sqlite3.connect(sp.runs_db_path())
         rid = con.execute("SELECT id FROM runs WHERE run_key = ?", (key,)).fetchone()[0]
         self.assertEqual(con.execute("SELECT run_id FROM onsky_files").fetchone()[0], rid)
-        self.assertEqual(con.execute("PRAGMA user_version").fetchone()[0], 1)
+        self.assertEqual(con.execute("PRAGMA user_version").fetchone()[0], history.SCHEMA_VERSION)
         con.close()
         # marking again (a re-written log) replaces the row
         self.assertTrue(history.mark_onsky_file(p, st.st_size + 1, st.st_mtime, None))

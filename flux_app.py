@@ -3,7 +3,7 @@
 The window: a blue sidebar with the six pages, a white card in the middle, the status strip with the busy bar at the
 bottom (SHOBS House Style, as SHOBS-SCHED). Milestone 0.1 (M1) brings the Check image page, the Profiles page and
 the foundation every later page stands on; 0.2–0.3 add the Camera page (bench and dark runs), 0.4 the Sky page
-(on-sky runs); History says what it will do and when.
+(on-sky runs), 0.5 the History page (trend plots, PNG / CSV export, the system report) and profile roll-back.
 
 Start it with the Desktop shortcut (Create shortcuts.bat), run_windows.bat, or `python flux_app.py`."""
 from __future__ import annotations
@@ -37,7 +37,8 @@ SUBTITLES = {
     "Sky": "Learns from your nights (SHOBS-P's on-sky logs or a folder of lights): zero point, extinction, seeing, "
            "sky brightness, scintillation and cadence per band, judging each night, into your system profile.",
     "Profiles": "The camera and system profiles SHOBS-P and SHOBS-SCHED read, value by value with its source.",
-    "History": "Every run FLUX has made; trend plots of any value over time.",
+    "History": "Any value of any setup over time, from every run FLUX has made; export the plot or its numbers, and "
+               "make a system report of a telescope + camera.",
 }
 SOURCE_TAG = {"measured": "measured", "header": "header", "spec": "spec", "estimate": "estimate", "user": "you",
               "derived": "worked out", "none": "—"}
@@ -510,6 +511,8 @@ class ProfilesPage:
         self.set_btn = style.green_button(top, "Set a value…", self.set_value)
         self.set_btn.pack(side=tk.LEFT)
         ttk.Button(top, text="Spec curves…", command=self.spec_curves).pack(side=tk.LEFT, padx=(px(app, 8), 0))
+        self.roll_btn = ttk.Button(top, text="Roll back…", command=self.roll_back)
+        self.roll_btn.pack(side=tk.LEFT, padx=(px(app, 8), 0))
         ttk.Button(top, text="Open the data folder", command=lambda: open_folder(sp.data_dir())).pack(side=tk.RIGHT)
         self.msg_var = tk.StringVar()
         self.msg = ttk.Label(self.frame, textvariable=self.msg_var, style="Card.TLabel")
@@ -532,9 +535,9 @@ class ProfilesPage:
         vb.pack(side=tk.RIGHT, fill=tk.Y)
         self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         hint = ttk.Label(self.frame, style="Hint.TLabel", justify=tk.LEFT,
-                         text="Spec curves… shows, types, imports and exports the maker's curves. Roll back to an "
-                              "earlier revision comes in 0.5; every save keeps the previous revision in the history "
-                              "folder.")
+                         text="Spec curves… shows, types, imports and exports the maker's curves. Every save keeps "
+                              "the previous revision; Roll back… puts an earlier one back (as a new revision, so a "
+                              "roll-back can be undone too).")
         hint.pack(anchor="w", fill=tk.X, pady=(px(app, 4), 0))
         follow_wrap(hint, self.frame, px(app, 10))
         self.paths: dict[str, str] = {}
@@ -579,6 +582,9 @@ class ProfilesPage:
             bits.append(f"updated {doc['updated']}")
         if doc.get("written_by"):
             bits.append(f"by {doc['written_by']}")
+        rb = doc.get("rolled_back")
+        if isinstance(rb, dict) and rb.get("to_revision") is not None:
+            bits.append(f"rolled back to revision {rb['to_revision']} on {str(rb.get('on') or '')[:10]}")
         bits.append(f"{len(hist)} earlier revision{'s' if len(hist) != 1 else ''} kept")
         self.info_var.set(" · ".join(bits) + f"\n{path}")
         if doc.get("format") == sp.SPEC_FORMAT:
@@ -605,6 +611,23 @@ class ProfilesPage:
                 "—" if v is None else (f"{v:g}" if isinstance(v, (int, float)) else str(v)), rec.get("unit") or "",
                 SOURCE_TAG.get(rec.get("source"), rec.get("source")), rec.get("date") or "", rec.get("note") or ""))
             self.rec_paths[iid] = rpath
+
+    def roll_back(self):
+        if not self.doc or self.doc[1].get("format") not in (sp.CAMERA_FORMAT, sp.SYSTEM_FORMAT):
+            set_msg(self.msg_var, self.msg, "⚠ Pick a camera or system profile first.")
+            return
+        import rollback
+        path = self.doc[0]
+        if not rollback.revisions(path):
+            set_msg(self.msg_var, self.msg, "⚠ This profile has no earlier revision yet.")
+            return
+        self.roll_dialog = RollbackDialog(self.app, path, self._rolled)
+
+    def _rolled(self, doc):
+        self.show()
+        set_msg(self.msg_var, self.msg, f"✔ Revision {doc['rolled_back']['to_revision']} put back as revision "
+                                        f"{doc['revision']}; the one it replaced is kept in the history folder.")
+        self.app.set_status(f"✔ {doc.get('profile_id')} rolled back to revision {doc['rolled_back']['to_revision']}.")
 
     def spec_curves(self):
         import spec_editor
@@ -656,49 +679,105 @@ class ProfilesPage:
                                         "history folder.")
 
 
-# ---- the pages still to come ---------------------------------------------------------------------------------------
+class RollbackDialog(tk.Toplevel):
+    """The earlier revisions of one profile, newest first; pick one to see what it held against the profile now,
+    and put it back."""
 
-class ComingPage:
-    """A page still to come (History until 0.5): what it will do, when, and what is already in place for it."""
+    def __init__(self, app, path: str, on_done):
+        import rollback
+        super().__init__(app)
+        self.app, self.path, self.on_done = app, path, on_done
+        self.title(f"{settings.APP_NAME}: Roll back {os.path.basename(path)[:-5]}")
+        self.configure(bg=style.CARD)
+        self.transient(app)
+        body = ttk.Frame(self, style="Card.TFrame", padding=(px(app, 16), px(app, 12)))
+        body.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(body, text="Roll back", style="Title.TLabel").pack(anchor="w")
+        hint = ttk.Label(body, style="Hint.TLabel", justify=tk.LEFT, wraplength=px(app, 720),
+                         text="Every save kept the revision before it. Pick one to see how it differs from the "
+                              "profile now; Put it back saves it as the newest revision (the one in use now is kept "
+                              "too, so you can roll forward again). SHOBS-P and SHOBS-SCHED read the newest.")
+        hint.pack(anchor="w", fill=tk.X, pady=(0, px(app, 8)))
+        cols = ("rev", "replaced", "by", "changes")
+        self.tree = ttk.Treeview(body, columns=cols, show="headings", height=7, selectmode="browse")
+        for c, w, words in zip(cols, (70, 150, 300, 200), ("Revision", "Replaced on", "Written by",
+                                                              "Differs from now")):
+            self.tree.heading(c, text=words)
+            self.tree.column(c, width=px(app, w), stretch=(c == "by"))
+        self.tree.pack(fill=tk.X)
+        self.tree.bind("<<TreeviewSelect>>", lambda _e: self.show())
+        ttk.Label(body, text="Values in that revision → in the profile now", style="Section.TLabel").pack(
+            anchor="w", pady=(px(app, 8), 0))
+        tf = ttk.Frame(body, style="Card.TFrame")
+        tf.pack(fill=tk.BOTH, expand=True)
+        self.text = tk.Text(tf, wrap="word", font=style.font(10), height=10, background="#ffffff",
+                            foreground=style.TEXT, relief="flat", padx=px(app, 6), pady=px(app, 6))
+        vb = ttk.Scrollbar(tf, orient=tk.VERTICAL, command=self.text.yview)
+        self.text.configure(yscrollcommand=vb.set)
+        vb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.msg_var = tk.StringVar()
+        self.msg = ttk.Label(body, textvariable=self.msg_var, style="Card.TLabel")
+        self.msg.pack(anchor="w", fill=tk.X, pady=(px(app, 6), 0))
+        btns = ttk.Frame(body, style="Card.TFrame")
+        btns.pack(fill=tk.X, pady=(px(app, 8), 0))
+        self.put_btn = style.green_button(btns, "Put it back", self.put_back)
+        self.put_btn.pack(side=tk.LEFT)
+        ttk.Button(btns, text="Close", command=self.destroy).pack(side=tk.RIGHT)
+        self.revs = rollback.revisions(path)
+        self.rows: dict[str, dict] = {}
+        for r in self.revs:
+            n = len(r["changes"])
+            iid = self.tree.insert("", "end", values=(
+                r["revision"] if r["revision"] is not None else "?", r["saved"], r.get("written_by") or "",
+                "cannot be read" if r.get("error") else ("same values as now" if n == 0 else
+                                                          f"{n} value{'s' if n != 1 else ''}")))
+            self.rows[iid] = r
+        kids = self.tree.get_children()
+        if kids:
+            self.tree.selection_set(kids[0])
+        self.show()
+        self.bind("<Escape>", lambda _e: self.destroy())
 
-    def __init__(self, app: "App", parent, name: str, text: str, extra=None):
-        self.app = app
-        self.title = name
-        self.extra = extra
-        self.frame = ttk.Frame(parent, style="Card.TFrame")
-        lab = ttk.Label(self.frame, text=text, style="Card.TLabel", justify=tk.LEFT)
-        lab.pack(anchor="w", fill=tk.X)
-        follow_wrap(lab, self.frame, px(app, 10))
-        self.var = tk.StringVar()
-        self.lab2 = ttk.Label(self.frame, textvariable=self.var, style="Ok.TLabel", justify=tk.LEFT)
-        self.lab2.pack(anchor="w", fill=tk.X, pady=(px(app, 10), 0))
-        follow_wrap(self.lab2, self.frame, px(app, 10))
-        self.tree = None
-        if name == "History":
-            cols = ("kind", "when", "camera", "status", "source")
-            self.tree = ttk.Treeview(self.frame, columns=cols, show="headings", height=14, selectmode="none")
-            for c, w in zip(cols, (70, 190, 220, 300, 260)):
-                self.tree.heading(c, text=c.capitalize())
-                self.tree.column(c, width=px(app, w), stretch=(c in ("status", "source")))
-            self.tree.pack(fill=tk.BOTH, expand=True, pady=(px(app, 8), 0))
+    def chosen(self):
+        sel = self.tree.selection()
+        return self.rows.get(sel[0]) if sel else None
 
-    def refresh(self):
-        if self.extra:
-            try:
-                self.var.set(self.extra())
-            except Exception as exc:
-                self.var.set(f"(could not look: {exc})")
-        if self.tree is not None:
-            self.tree.delete(*self.tree.get_children())
-            for r in history.recent_runs(200):
-                self.tree.insert("", "end", values=(r["kind"], r["started"], r.get("camera_id") or "",
-                                                    history.status_text(r), r.get("source") or ""))
+    def show(self):
+        r = self.chosen()
+        self.text.configure(state="normal")
+        self.text.delete("1.0", tk.END)
+        if r is None:
+            pass
+        elif r.get("error"):
+            self.text.insert("1.0", f"This revision cannot be read: {r['error']}.")
+        elif not r["changes"]:
+            self.text.insert("1.0", "Every value is the same as in the profile now (only dates or notes differ).")
+        else:
+            self.text.insert("1.0", "\n".join(f"{name}:   {old}   →   {new}" for name, old, new in r["changes"]))
+        self.text.configure(state="disabled")
+        ok = bool(r and r.get("doc") is not None)
+        self.put_btn.state(["!disabled"] if ok else ["disabled"])
 
-
-HISTORY_TEXT = (
-    "Coming in 0.5 (milestone 5): trend plots of any value per setup and date range (zero point, extinction, seeing, "
-    "read noise against the camera's spec line…), exported as PNG with the date and time, or as CSV; profile "
-    "roll-back. Every run FLUX makes is already recorded:")
+    def put_back(self):
+        import rollback
+        from tkinter import messagebox
+        r = self.chosen()
+        if not r or r.get("doc") is None:
+            return
+        if not self.app.testing and not messagebox.askyesno(
+                settings.APP_NAME, f"Put revision {r['revision']} back as the newest revision?\n\n"
+                f"{len(r['changes'])} value(s) change. The revision in use now is kept in the history folder.",
+                parent=self):
+            return
+        try:
+            doc = rollback.roll_back(self.path, r["path"], settings.WRITTEN_BY)
+        except (rollback.RollbackError, OSError) as exc:
+            set_msg(self.msg_var, self.msg, f"✖ {exc}")
+            return
+        settings.log(f"rolled {self.path} back to revision {r['revision']} (now revision {doc.get('revision')})")
+        self.destroy()
+        self.on_done(doc)
 
 
 # ---- Credits -------------------------------------------------------------------------------------------------------
@@ -877,7 +956,7 @@ class App(tk.Tk):
                       self._camera_page(holder),
                       self._sky_page(holder),
                       self.profiles_page,
-                      ComingPage(self, holder, "History", HISTORY_TEXT)]
+                      self._history_page(holder)]
         for p in self.pages:
             p.frame.place(relx=0, rely=0, relwidth=1, relheight=1)
         self.credits_page = CreditsPage(self, holder)
@@ -888,6 +967,11 @@ class App(tk.Tk):
         import camera_page
         self.camera_page = camera_page.CameraPage(self, holder)
         return self.camera_page
+
+    def _history_page(self, holder):
+        import history_page
+        self.history_page = history_page.HistoryPage(self, holder)
+        return self.history_page
 
     def _sky_page(self, holder):
         import sky_page

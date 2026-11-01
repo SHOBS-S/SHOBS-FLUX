@@ -5,7 +5,9 @@ results as JSON; every value a run measures is one row in run_values, so the His
 over time and trace it back to its run. SHOBS-P's on-sky log files are recorded in onsky_files when FLUX reads them,
 so no night is counted twice.
 
-The schema has a version (PRAGMA user_version); a newer FLUX adds tables or columns and never drops data."""
+The schema has a version (PRAGMA user_version); a newer FLUX adds tables or columns and never drops data.
+Version 2 (FLUX 0.5) adds runs.removed: a run taken off the History page is only marked (it leaves the list and the
+trend plots, and can be put back), so a log once read is never read again by mistake and nothing is lost."""
 from __future__ import annotations
 
 import json
@@ -15,7 +17,7 @@ import time
 
 import shobs_profile as sp
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
@@ -30,7 +32,8 @@ CREATE TABLE IF NOT EXISTS runs (
     source      TEXT,                        -- the frame, folder or on-sky log the run read
     n_frames    INTEGER,
     status      TEXT,                        -- ok / warn / bad / failed
-    summary     TEXT                         -- JSON
+    summary     TEXT,                        -- JSON
+    removed     INTEGER NOT NULL DEFAULT 0   -- 1 = taken off the History page (schema 2)
 );
 CREATE INDEX IF NOT EXISTS runs_by_camera ON runs(camera_id, started);
 CREATE TABLE IF NOT EXISTS run_values (
@@ -82,6 +85,9 @@ def connect() -> sqlite3.Connection:
     ver = con.execute("PRAGMA user_version").fetchone()[0]
     if ver < SCHEMA_VERSION:
         con.executescript(SCHEMA)
+        cols = {r[1] for r in con.execute("PRAGMA table_info(runs)").fetchall()}
+        if "removed" not in cols:                              # a version-1 database: add the column, keep every row
+            con.execute("ALTER TABLE runs ADD COLUMN removed INTEGER NOT NULL DEFAULT 0")
         con.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         con.commit()
     return con
@@ -156,12 +162,16 @@ def mark_onsky_file(path: str, size: int, mtime: float, run_key: str | None = No
         return False
 
 
-def recent_runs(limit: int = 50, kind: str | None = None) -> list[dict]:
+def recent_runs(limit: int = 50, kind: str | None = None, removed: bool = False) -> list[dict]:
+    """The newest runs first. removed=True also lists the runs taken off the History page."""
     try:
         con = connect()
         try:
             con.row_factory = sqlite3.Row
-            q = "SELECT * FROM runs" + (" WHERE kind = ?" if kind else "") + " ORDER BY id DESC LIMIT ?"
+            where = [] if removed else ["removed = 0"]
+            if kind:
+                where.append("kind = ?")
+            q = "SELECT * FROM runs" + (" WHERE " + " AND ".join(where) if where else "") + " ORDER BY id DESC LIMIT ?"
             rows = con.execute(q, ((kind, limit) if kind else (limit,))).fetchall()
             return [dict(r) for r in rows]
         finally:
@@ -199,7 +209,7 @@ def values_for(keys: tuple, profile_ids: list | None = None, limit: int = 2000) 
         try:
             con.row_factory = sqlite3.Row
             q = ("SELECT v.key, v.channel, v.value, v.sigma, v.unit, v.date, v.profile_id, r.run_key, r.kind, "
-                 "r.started FROM run_values v JOIN runs r ON r.id = v.run_id WHERE v.key IN (" +
+                 "r.started FROM run_values v JOIN runs r ON r.id = v.run_id WHERE r.removed = 0 AND v.key IN (" +
                  ",".join("?" * len(keys)) + ")")
             args = list(keys)
             if profile_ids is not None:
@@ -214,3 +224,224 @@ def values_for(keys: tuple, profile_ids: list | None = None, limit: int = 2000) 
             con.close()
     except (sqlite3.Error, OSError):
         return []
+
+
+# ---- the History page (0.5): setups, trend series, removing a run ----------------------------------------------------
+
+# What each value is called on the History page and in the system report, in the order the drop-down lists them.
+# (key, words, kind of run it comes from)
+VALUE_WORDS = {
+    "bands.zero_point": "Zero point at airmass 1",
+    "bands.zero_point_at_x": "Zero point at the night's airmass",
+    "bands.extinction_k": "Extinction k",
+    "bands.fwhm_in_focus": "Seeing in focus (FWHM)",
+    "bands.fwhm_defocus": "Star size defocused (FWHM)",
+    "bands.sky_brightness": "Sky brightness",
+    "bands.scintillation_cy": "Scintillation C_Y",
+    "cadence.overhead_s": "Time lost between frames",
+    "cadence.interval_s": "Time between frame starts",
+    "gain_e_per_adu": "Gain",
+    "read_noise_e": "Read noise",
+    "full_well_e": "Full well",
+    "linear_limit_adu": "Linear limit",
+    "bias_level_adu": "Bias level",
+    "exposure_offset_s": "Exposure-timing offset",
+    "dark_current_e_per_px_s": "Dark current",
+    "hot_pixel_ppm": "Hot pixels",
+    "glow_e_per_px_s": "Edge glow",
+}
+SYSTEM_KINDS = ("onsky",)              # one row per night; "sky" runs are the combined values a save wrote
+CAMERA_KINDS = ("bench", "darks")
+
+
+def value_words(key: str, channel: str | None = None) -> str:
+    """'Zero point at airmass 1 (green (TG))', 'Read noise (R)', 'Dark current (-10 °C)'."""
+    import onsky
+    words = VALUE_WORDS.get(key, key)
+    if not channel:
+        return words
+    ch = str(channel)
+    if ch.endswith("C") and ch[:-1].lstrip("-").replace(".", "", 1).isdigit():
+        return f"{words} ({ch[:-1]} °C)"
+    return f"{words} ({onsky.BAND_WORDS.get(ch, ch)})"
+
+
+def parse_system_id(pid: str | None):
+    """'ioptron-14-rc-2903mm__zwo…' → ('ioptron-14-rc', 2903.0, 'zwo…'); anything else → (None, None, None)."""
+    import re
+    m = re.match(r"^(.*?)-(\d+(?:\.\d+)?)mm__(.+)$", str(pid or ""))
+    if not m:
+        return None, None, None
+    return m.group(1), float(m.group(2)), m.group(3)
+
+
+def same_system(a: str | None, b: str | None, tolerance: float = 0.03) -> bool:
+    """Two system ids for the same setup: the same camera id and focal lengths within 3 % (the telescope's name is
+    not compared: a night saved before the name was typed, or under an old name, still belongs to the setup)."""
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    _ta, fa, ca = parse_system_id(a)
+    _tb, fb, cb = parse_system_id(b)
+    if ca is None or cb is None or ca != cb or not fa or not fb:
+        return False
+    return abs(fa - fb) <= tolerance * max(fa, fb)
+
+
+def _rows(q: str, args=()) -> list[dict]:
+    try:
+        con = connect()
+        try:
+            con.row_factory = sqlite3.Row
+            return [dict(r) for r in con.execute(q, args).fetchall()]
+        finally:
+            con.close()
+    except (sqlite3.Error, OSError):
+        return []
+
+
+def setups() -> list[dict]:
+    """Every setup the History page can show: each saved system and camera profile, and any setup the run history
+    knows without a profile. [{"kind": "system"|"camera", "id", "words", "path" or None}], systems first."""
+    out: list[dict] = []
+    seen_sys: list[str] = []
+    for path in sp.list_profiles("systems"):
+        try:
+            doc = sp.load(path)
+        except sp.ProfileError:
+            continue
+        pid = doc.get("profile_id") or os.path.basename(path)[:-5]
+        tel = doc.get("telescope") or {}
+        cam = doc.get("camera_profile") or ""
+        words = f"{tel.get('name') or pid.split('__')[0]} + {cam.split('__')[0]}"
+        if tel.get("focal_mm"):
+            words += f" ({tel['focal_mm']:g} mm)"
+        out.append({"kind": "system", "id": pid, "words": words, "path": path})
+        seen_sys.append(pid)
+    for r in _rows("SELECT DISTINCT system_id FROM runs WHERE system_id IS NOT NULL AND removed = 0"):
+        sid = r["system_id"]
+        if sid and not any(same_system(sid, s) for s in seen_sys):
+            out.append({"kind": "system", "id": sid, "words": f"{sid} (no profile saved)", "path": None})
+            seen_sys.append(sid)
+    seen_cam = []
+    for path in sp.list_profiles("cameras"):
+        pid = os.path.basename(path)[:-5]
+        out.append({"kind": "camera", "id": pid, "words": f"Camera {pid}", "path": path})
+        seen_cam.append(pid)
+    for r in _rows("SELECT DISTINCT camera_id FROM runs WHERE camera_id IS NOT NULL AND removed = 0 AND kind IN "
+                   "('check', 'bench', 'darks')"):
+        cid = r["camera_id"]
+        if cid and cid not in seen_cam:
+            out.append({"kind": "camera", "id": cid, "words": f"Camera {cid} (no profile saved)", "path": None})
+            seen_cam.append(cid)
+    return out
+
+
+def _setup_rows(kind: str, sid: str, include_removed: bool = False) -> list[dict]:
+    """Every value row of one setup with its run (newest run first)."""
+    kinds = SYSTEM_KINDS if kind == "system" else CAMERA_KINDS
+    q = ("SELECT v.key, v.channel, v.value, v.sigma, v.unit, v.source, v.date, v.profile_id, r.run_key, r.kind, "
+         "r.started, r.source AS run_source, r.status, r.system_id, r.camera_id, r.summary, r.removed "
+         "FROM run_values v JOIN runs r ON r.id = v.run_id WHERE r.kind IN (" + ",".join("?" * len(kinds)) + ")")
+    args: list = list(kinds)
+    if not include_removed:
+        q += " AND r.removed = 0"
+    q += " ORDER BY r.id DESC"
+    rows = _rows(q, args)
+    if kind == "system":
+        return [r for r in rows if same_system(r.get("system_id") or r.get("profile_id"), sid)]
+    return [r for r in rows if (r.get("profile_id") or r.get("camera_id")) == sid]
+
+
+def available(kind: str, sid: str) -> list[tuple]:
+    """The values one setup has a trend for: [(key, channel, words, n points)], in VALUE_WORDS order."""
+    count: dict = {}
+    for r in series_points(kind, sid):
+        count[(r["key"], r["channel"])] = count.get((r["key"], r["channel"]), 0) + 1
+    order = list(VALUE_WORDS)
+    return sorted(((k, c, value_words(k, c), n) for (k, c), n in count.items()),
+                  key=lambda t: (order.index(t[0]) if t[0] in order else 99, str(t[1] or "")))
+
+
+def _night_of(row) -> str:
+    """The date a point is plotted at: the night for on-sky rows, the run's (or its data's) date otherwise."""
+    d = str(row.get("date") or row.get("started") or "")[:10]
+    return d
+
+
+def series_points(kind: str, sid: str, key: str | None = None, channel: str | None = "*", date_from: str = "",
+                  date_to: str = "", include_removed: bool = False) -> list[dict]:
+    """The points of one setup's trends, oldest first: date, value, sigma, unit, key, channel, run_key, kind, started,
+    target (on-sky nights), photometric, removed. key / channel narrow it (channel "*" = any). One point per night,
+    value and band: when a night was read more than once (a re-run, or the same log after SHOBS-P wrote it again) the
+    newest run counts. Dates are YYYY-MM-DD and inclusive."""
+    out: dict = {}
+    for r in _setup_rows(kind, sid, include_removed):
+        if key is not None and r["key"] != key:
+            continue
+        if channel != "*" and (r["channel"] or None) != (channel or None):
+            continue
+        if r.get("value") is None:
+            continue
+        day = _night_of(r)
+        if date_from and day < date_from or date_to and day > date_to:
+            continue
+        try:
+            summ = json.loads(r.get("summary") or "{}")
+        except (TypeError, ValueError):
+            summ = {}
+        if not isinstance(summ, dict):
+            summ = {}
+        ident = (day, r["key"], r["channel"], summ.get("defocus") or "") if r["kind"] == "onsky" else \
+            (r["run_key"], r["key"], r["channel"])
+        if ident in out:                               # rows come newest run first: the first one seen counts
+            continue
+        out[ident] = {"date": day, "value": r["value"], "sigma": r.get("sigma"), "unit": r.get("unit") or "",
+                      "key": r["key"], "channel": r["channel"], "run_key": r["run_key"], "kind": r["kind"],
+                      "started": r["started"], "target": summ.get("target") or "",
+                      "photometric": summ.get("photometric"), "marginal": summ.get("marginal"),
+                      "defocus": summ.get("defocus") or "", "source_path": r.get("run_source") or "",
+                      "removed": bool(r.get("removed"))}
+    return sorted(out.values(), key=lambda p: (p["date"], p["started"] or ""))
+
+
+def set_removed(run_key: str, removed: bool = True) -> bool:
+    """Take a run off the History page (or put it back). Its rows stay in the database, and an on-sky log it read
+    stays known, so the next Sky run does not read that night again. Returns False when it could not be written."""
+    try:
+        con = connect()
+        try:
+            cur = con.execute("UPDATE runs SET removed = ? WHERE run_key = ?", (1 if removed else 0, run_key))
+            con.commit()
+            return cur.rowcount > 0
+        finally:
+            con.close()
+    except (sqlite3.Error, OSError):
+        return False
+
+
+CSV_COLUMNS = ("date", "value", "sigma", "unit", "value_name", "band_or_channel", "target", "photometric", "run",
+               "kind", "recorded")
+
+
+def write_csv(path: str, points: list[dict], setup_words: str, version: str) -> None:
+    """The plotted points as CSV, with a comment line saying what, for which setup, and when it was made (DTG)."""
+    import csv
+    with open(path, "w", encoding="utf-8", newline="") as fh:
+        fh.write(f"# {setup_words}\n# Created {dtg()} by SHOBS-FLUX {version}\n")
+        w = csv.writer(fh)
+        w.writerow(CSV_COLUMNS)
+        for p in points:
+            w.writerow([p["date"], f"{p['value']:.6g}", "" if p.get("sigma") is None else f"{p['sigma']:.4g}",
+                        p.get("unit") or "", VALUE_WORDS.get(p["key"], p["key"]), p.get("channel") or "",
+                        p.get("target") or "", "" if p.get("photometric") is None else
+                        ("marginal" if p.get("marginal") else ("yes" if p["photometric"] else "no")),
+                        p.get("run_key") or "", p.get("kind") or "", p.get("started") or ""])
+
+
+def dtg(when=None) -> str:
+    """A military Date Time Group, Zulu, as SHOBS-P stamps its files: "010345Z NOV 26"."""
+    from datetime import datetime, timezone
+    now = when or datetime.now(timezone.utc)
+    return now.strftime("%d%H%MZ ") + now.strftime("%b %y").upper()

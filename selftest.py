@@ -10,6 +10,7 @@ Sections:
   3c the dark run (dark current, hot pixels, edge glow) on synthetic dark libraries, the spec curves and their plots
   3d on-sky: zero point, extinction, scintillation and the judging of nights on synthetic on-sky logs
   4 the run history database
+  4b History (0.5): trend series, taking a run off, the trend plot and its DTG, profile roll-back, the system report
   5 the window (Check image on a frame, every page) — needs a display
   6 your SHOBS data folder: what is there (read only; reported, never a failure)
 """
@@ -271,6 +272,58 @@ def s4_history():
     check("run history database written and read", bool(key) and history.recent_runs(1)[0]["run_key"] == key)
 
 
+def s4b_m5():
+    import history
+    import report
+    import rollback
+    import trend_plots
+    import shobs_profile as sp
+    from matplotlib.figure import Figure
+    sys.path.insert(0, os.path.join(HERE, "tests"))
+    import m5_data
+    old_home = os.environ["SHOBS_DATA_HOME"]
+    os.environ["SHOBS_DATA_HOME"] = os.path.join(TMP, "data_m5")        # its own folder: no profile from 3b–3d
+    try:
+        _s4b(m5_data, history, report, rollback, trend_plots, sp, Figure)
+    finally:
+        os.environ["SHOBS_DATA_HOME"] = old_home
+
+
+def _s4b(m5_data, history, report, rollback, trend_plots, sp, Figure):
+    d = m5_data.make(os.path.join(TMP, "m5"))
+    pts = history.series_points("system", d["system_id"], "bands.zero_point", "TG")
+    check("trend series: one zero point per photometric night", [p["date"] for p in pts] ==
+          ["2026-10-18", "2026-10-19"], str([p["date"] for p in pts]))
+    key = d["run_keys"][-1]
+    n0 = len(history.series_points("system", d["system_id"]))
+    history.set_removed(key, True)
+    n1 = len(history.series_points("system", d["system_id"]))
+    history.set_removed(key, False)
+    check("a run taken off leaves the trends and comes back", n1 < n0 == len(history.series_points(
+        "system", d["system_id"])))
+    fig = Figure(figsize=(8, 4))
+    trend_plots.draw_trend(fig, pts, "Zero point", "mag", now={"value": 20.2, "source": "measured"},
+                           event="2026-10-19")
+    mark = trend_plots.stamp(fig, "selftest")
+    fig.savefig(os.path.join(TMP, "trend.png"))
+    check("trend plot draws, stamped with the DTG", os.path.getsize(os.path.join(TMP, "trend.png")) > 10000
+          and "Z " in mark.get_text())
+    revs = rollback.revisions(d["camera_path"])
+    doc = rollback.roll_back(d["camera_path"], revs[0]["path"], "selftest")
+    check("profile roll-back saves the old revision as a new one", doc["revision"] == 3
+          and doc["values"]["gain_e_per_adu"]["source"] == "header" and sp.validate(doc) == [])
+    info = report.gather(d["system_path"], prefs={"sky_telescopes": [
+        {"camera_id": d["camera_id"], "focal": 2900, "lat": 35.0, "lon": -82.0, "elevation_m": 300.0}]})
+    bg = info["budgets"][0] if info["budgets"] else None
+    check("photon budget worked out", bg is not None and 0.05 < bg["measured_eff"] < 1.0
+          and 0.05 < bg["predicted_eff"] < 1.0)
+    out = os.path.join(TMP, "report.pdf")
+    n = report.write_pdf(info, out, share=True, version="selftest")
+    with open(out, "rb") as fh:
+        head = fh.read(5)
+    check(f"system report PDF written ({n} pages)", head == b"%PDF-" and n >= 6)
+
+
 def s5_window():
     try:
         import tkinter as tk
@@ -323,6 +376,7 @@ def main() -> int:
     section("3c The dark run and the spec curves (synthetic darks)", s3c_darks)
     section("3d On-sky (synthetic nights)", s3d_onsky)
     section("4  Run history", s4_history)
+    section("4b History, roll-back and the system report", s4b_m5)
     section("5  The window", s5_window)
     section("6  Your SHOBS data folder (read only)", s6_data_folder)
     say("")

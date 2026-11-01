@@ -60,6 +60,10 @@ CREDITS = [
         ("Scintillation", "Young's C_Y from each star's frame-to-frame scatter (the Sky page), with the modified "
          "Young approximation SHOBS-P uses.",
          "Young, A. T. 1967, AJ 72, 747; Osborn, J. et al. 2015, MNRAS 452, 1707.", ""),
+        ("Photon zero points", "The photons a magnitude-0 star sends through each band, for the system report's "
+         "photon budget: Johnson–Cousins bands on the Vega scale, Sloan bands on the AB scale (3631 Jy).",
+         "Bessell, M. S., Castelli, F. & Plez, B. 1998, A&A 333, 231; Oke, J. B. & Gunn, J. E. 1983, ApJ 266, 713; "
+         "Fukugita, M. et al. 1996, AJ 111, 1748.", ""),
         ("Airmass", "The airmass of frames whose header gives none.",
          "Kasten, F. & Young, A. T. 1989, Applied Optics 28, 4735.", ""),
         ("The Moon's phase", "The Moon's illuminated fraction for each night (the dark nights set the sky "
@@ -82,7 +86,8 @@ CREDITS = [
          "https://scipy.org"),
         ("Astropy", "Reading FITS files; WCS plate solutions, times and sky coordinates (the Sky page).", "Astropy Collaboration 2022, ApJ 935, 167.", "https://www.astropy.org"),
         ("Matplotlib", "The frame picture on the Check image page; the photon transfer, linearity, dark and "
-         "measured-against-spec plots; the Sky page's night plots.",
+         "measured-against-spec plots; the Sky page's night plots; the History page's trend plots and the system report "
+         "(PDF).",
          "Hunter, J. D. 2007, Computing in Science & Engineering 9, 90.", "https://matplotlib.org"),
     ]),
 ]

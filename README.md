@@ -9,7 +9,7 @@ own system's numbers instead of guesses.
 > **Work in progress.** SHOBS-FLUX is being built in six milestones (0.1 to 0.6). There is no release yet: 1.0.0
 > comes when version 1 is complete and working well.
 
-## What works now (0.4)
+## What works now (0.5)
 
 - **Check image.** Open any FITS or XISF frame. FLUX reports the sky in electrons per pixel (and per second) for each
   color, whether the exposure is sky- or read-noise-limited, saturated pixels, stars over the linear limit or
@@ -57,14 +57,35 @@ own system's numbers instead of guesses.
   (showing what changes first; values you typed can be kept). Every night FLUX uses goes into the run history once.
 - **Profiles.** The camera and system profiles in your SHOBS data folder, value by value with its source. Save a
   starting camera profile from a frame, type your own values (a linear limit, say); every save keeps the previous
-  revision.
-- **History.** Every check, bench run, dark run and on-sky night is recorded, with its worst finding in a few words.
+  revision, and **Roll back…** puts an earlier one back (shown against the profile now, value by value). A roll-back
+  is saved as a new revision, so it can be undone too.
+- **History.** Pick a setup (a telescope + camera, or a camera) and any value it has a history for: zero point,
+  extinction, seeing in focus and defocused, sky brightness, scintillation, cadence, gain, read noise, dark current…
+  Each night or run is a point with its error bar (marginal and non-photometric nights marked), with the profile's
+  value now and, for the camera, the maker's spec at your gain. Pick the dates, and give an **event date** (a mirror
+  cleaning, a collimation) to compare the mean before and after. **Export PNG** (stamped with the date-time group)
+  and **Export CSV**. Below the plot, the setup's runs, each with its worst finding in a few words; a bad night or a
+  test can be **taken off the page** (nothing is deleted; it can be put back).
+- **System report.** One PDF of a telescope + camera to keep or send: the setup and the dates of the data, the key
+  numbers, every camera value with its source and the other values it has had (FLUX's own measurement beside an
+  operator's figure, say) and the maker's spec, the on-sky numbers per band with their nights plotted, the
+  **throughput measured against a photon budget** (aperture, obstruction, mirrors, corrector, filter and QE; type the
+  ones you know, the rest are assumed and the report says so), the zero point and seeing over time with a
+  before / after split, and the methods and caveats. A **shared copy** leaves out the site (latitude, longitude,
+  elevation) and the file locations on your computer.
+
+## New in 0.5
+
+- The History page: trend plots of any value per setup and date range, with an event date for before / after; PNG
+  and CSV export; runs can be taken off the page and put back. The run history database moves to version 2 (one new
+  column; nothing is lost, and the upgrade is automatic).
+- Profile roll-back on the Profiles page.
+- The system report (History page → System report…), full or shared.
 
 ## Coming
 
 | Milestone | What |
 | --- | --- |
-| 0.5 | History and trend plots, CSV and PNG export, profile roll-back |
 | 0.6 | SHOBS-P and SHOBS-SCHED read the profiles; release 1.0.0 |
 
 ## Install (Windows)
