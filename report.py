@@ -89,10 +89,14 @@ def rec_words(rec) -> str:
     return fmt(rec.get("value"), rec.get("unit") or "", sigma=rec.get("sigma"))
 
 
+# The report is read by other people too: "typed by you" would name the reader, so a typed value is "entered by hand".
+REPORT_SOURCE_WORDS = {**sp.SOURCE_WORDS, "user": "entered by hand"}
+
+
 def source_words(rec) -> str:
     if not sp.is_record(rec):
         return "not known"
-    return sp.SOURCE_WORDS.get(rec.get("source"), str(rec.get("source")))
+    return REPORT_SOURCE_WORDS.get(rec.get("source"), str(rec.get("source")))
 
 
 # ---- gathering -------------------------------------------------------------------------------------------------------
@@ -406,7 +410,8 @@ class Page:
         lh = size / 72 * 1.3
 
         def wrap_row(cells):
-            return [textwrap.wrap(str(c), max(4, int(w * 72 / (size * 0.5)))) or [""] for c, w in zip(cells, widths)]
+            return [textwrap.wrap(str(c), max(4, int((w - 0.1) * 72 / (size * 0.55)))) or [""]
+                    for c, w in zip(cells, widths)]
         if any(str(h).strip() for h in header):
             hdr = wrap_row(header)
             hh = max(len(c) for c in hdr) * lh + 0.08
@@ -593,7 +598,7 @@ def write_pdf(info: dict, path: str, share: bool = False, version: str = "") -> 
             rows.append([r["words"], r["value"], r["source"], "; ".join(other) or "—",
                          r["conditions"] + (f" ({r['note']})" if r["note"] else "")])
         p = table(pdf, p, "Camera", ["Value", "Now", "Source", "Other values", "Conditions"], rows,
-                  [1.25, 1.3, 1.05, 1.9, 1.8])
+                  [1.2, 1.55, 1.0, 1.8, 1.75])
         if info["per_channel"]:
             p.heading("Per color")
             keys = [k for k, _w in CAMERA_ROWS if any(k in v for v in info["per_channel"].values())]
