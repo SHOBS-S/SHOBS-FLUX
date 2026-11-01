@@ -48,6 +48,9 @@ OPTICS = (
     ("filter_transmission", "Filter transmission in the band", 0.90, "a good interference filter"),
     ("qe_in_band", "Camera QE in the band", None, "the camera's peak QE"),
 )
+# One-shot-color bands: FLUX counts only the pixels of that color (RGGB: half are green, a quarter red, a quarter
+# blue), so only that share of the light falling in the aperture can become counted electrons.
+BAYER_SHARE = {"TG": 0.5, "TR": 0.25, "TB": 0.25}
 COAT_WORDS = {"user": "typed in the report window", "profile": "set for this system", "assumed": "assumed"}
 
 CAMERA_ROWS = (("gain_e_per_adu", "Gain"), ("read_noise_e", "Read noise"), ("full_well_e", "Full well"),
@@ -120,8 +123,8 @@ def earlier_values(cam_path: str | None, key: str, now_rec) -> list[str]:
         except sp.ProfileError:
             continue
         rec = (doc.get("values") or {}).get(key)
-        if not sp.is_record(rec) or sp.value_of(rec) is None:
-            continue
+        if not sp.is_record(rec) or sp.value_of(rec) is None or rec.get("source") in ("estimate", "none"):
+            continue                                       # a first guess says nothing about the camera
         k = (round(float(rec["value"]), 6), rec.get("source"))
         if k in seen or (now_key and (round(float(now_key[0]), 6) if now_key[0] is not None else None,
                                       now_key[1]) == k):
@@ -165,7 +168,8 @@ def budget(band: str, zp1, k, aperture_mm, optics: dict) -> dict | None:
       ideal_zp      mag for 1 e⁻/s above the atmosphere with every photon on the full aperture counted
       measured_zp0  the zero point moved above the atmosphere (ZP at airmass 1 + k)
       measured_eff  10^(-0.4 (ideal − measured_zp0)): the fraction of photons that become electrons
-      predicted_eff (1 − obstruction²) × R^mirrors × corrector × filter × QE
+      predicted_eff (1 − obstruction²) × R^mirrors × corrector × filter × QE (× the share of pixels of that color
+                    for a one-shot-color band: half for green, a quarter for red or blue)
       predicted_zp1 the zero point at airmass 1 the budget predicts
       shortfall_mag predicted_zp1 − measured ZP (positive: the system is fainter than the budget)"""
     cat = onsky.BAND_CATALOG.get(band, band)
@@ -185,6 +189,8 @@ def budget(band: str, zp1, k, aperture_mm, optics: dict) -> dict | None:
              ("Corrector / reducer", o["corrector_transmission"]),
              ("Filter", o["filter_transmission"]),
              ("Camera QE", o["qe_in_band"])]
+    if band in BAYER_SHARE:
+        parts.append((f"Pixels of this color (one-shot color: {BAYER_SHARE[band]:.0%} of them)", BAYER_SHARE[band]))
     pred = 1.0
     for _n, v in parts:
         pred *= v

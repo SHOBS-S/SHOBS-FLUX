@@ -205,6 +205,7 @@ class TestReport(TempData):
         self.assertIsNone(report.budget("SI", 22.4, 0.08, None, optics))
         v = report.budget("TG", 20.0, None, 356, optics)
         self.assertEqual(v["catalog_band"], "V")
+        self.assertAlmostEqual(v["predicted_eff"], pred * 0.5, places=9)    # only the green pixels count
         self.assertAlmostEqual(v["k"], 0.20)                       # typical V extinction when none is measured
 
     def test_optics_assumed_and_osc(self):
