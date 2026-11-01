@@ -583,7 +583,7 @@ class ProfilesPage:
         if doc.get("written_by"):
             bits.append(f"by {doc['written_by']}")
         rb = doc.get("rolled_back")
-        if isinstance(rb, dict) and rb.get("to_revision") is not None:
+        if isinstance(rb, dict) and rb.get("to_revision") is not None and rb.get("as_revision") == doc.get("revision"):
             bits.append(f"rolled back to revision {rb['to_revision']} on {str(rb.get('on') or '')[:10]}")
         bits.append(f"{len(hist)} earlier revision{'s' if len(hist) != 1 else ''} kept")
         self.info_var.set(" · ".join(bits) + f"\n{path}")
@@ -726,6 +726,10 @@ class RollbackDialog(tk.Toplevel):
         ttk.Button(btns, text="Close", command=self.destroy).pack(side=tk.RIGHT)
         self.revs = rollback.revisions(path)
         self.rows: dict[str, dict] = {}
+        try:
+            self.grab_set()                       # one roll-back at a time
+        except tk.TclError:
+            pass
         for r in self.revs:
             n = len(r["changes"])
             iid = self.tree.insert("", "end", values=(

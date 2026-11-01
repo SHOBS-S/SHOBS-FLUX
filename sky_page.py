@@ -833,6 +833,8 @@ class SkyPage:
     def _record_nights(self, res: SkyRun) -> int:
         """Each night used goes into the run history once (keyed by its log's path, size and time)."""
         pid = self.system_id(res, ask=False)
+        if pid is None and res.datasets:            # no telescope name yet: camera + focal still join it to its setup
+            pid = sp.system_id("", focal_of(res.datasets), camera_of(res))
         n = 0
         for r in res.summary.nights:
             path = r.ds.path

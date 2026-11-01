@@ -143,6 +143,7 @@ class HistoryPage:
         rb.pack(side=tk.LEFT, padx=(px(app, 6), px(app, 6)))
         rb.bind("<<ComboboxSelected>>", lambda _e: self.pick_range())
         self.from_var, self.to_var, self.event_var = tk.StringVar(), tk.StringVar(), tk.StringVar()
+        self._dates_seen = ("", "", "")         # what the date boxes held at the last redraw
         ttk.Label(row2, text="from", style="Card.TLabel").pack(side=tk.LEFT)
         self.from_entry = ttk.Entry(row2, textvariable=self.from_var, width=12)
         self.from_entry.pack(side=tk.LEFT, padx=px(app, 4))
@@ -247,6 +248,7 @@ class HistoryPage:
 
     def pick_range(self):
         r = self.range_var.get()
+        self._range_set = None
         today = datetime.now()
         if r == "All dates":
             self.from_var.set("")
@@ -255,16 +257,29 @@ class HistoryPage:
             days = {"Last 30 days": 30, "Last 90 days": 90, "Last year": 365}[r]
             self.from_var.set((today - timedelta(days=days)).strftime("%Y-%m-%d"))
             self.to_var.set("")
+        self._range_set = (self.from_var.get(), self.to_var.get())
         self.redraw()
 
-    def typed_dates(self):
-        if self.from_var.get().strip() or self.to_var.get().strip():
-            if self.range_var.get() == "All dates":
-                self.range_var.set("These dates")
+    def typed_dates(self, force: bool = False):
+        """Return or leaving a date box: redraw only when something changed (leaving a box with a bad date in it
+        would otherwise warn again at every click)."""
+        try:
+            if not self.frame.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        now = (self.from_var.get().strip(), self.to_var.get().strip(), self.event_var.get().strip())
+        if now == self._dates_seen and not force:
+            return
+        if (now[0], now[1]) != getattr(self, "_range_set", None) and (now[0] or now[1]):
+            self.range_var.set("These dates")
+        elif not (now[0] or now[1]):
+            self.range_var.set("All dates")
         self.redraw()
 
     def dates(self):
         """(from, to, event) as YYYY-MM-DD ('' when empty), or None after saying which one is not a date."""
+        self._dates_seen = (self.from_var.get().strip(), self.to_var.get().strip(), self.event_var.get().strip())
         out = []
         for var, words in ((self.from_var, "From"), (self.to_var, "To"), (self.event_var, "Event")):
             d = parse_date(var.get())
@@ -311,7 +326,7 @@ class HistoryPage:
             ba = trend_plots.before_after(self.points, event)
             if ba:
                 e = ba["change_err"]
-                import trend_plots as tp
+                tp = trend_plots
                 self.say(f"Before {event}: {tp.num(ba['before']['mean'])} ({ba['before']['n']}); from it on: "
                          f"{tp.num(ba['after']['mean'])} ({ba['after']['n']}); change {tp.num(ba['change'], True)}"
                          + (f" ± {tp.num(e)}" if e == e else "") + f" {unit}.")
@@ -367,8 +382,13 @@ class HistoryPage:
             self.say("✖ The run history could not be written (is another FLUX open?).")
             return
         settings.log(f"run {r['run_key']} {'taken off' if remove else 'put back'}")
+        before = self.value_var.get().split("   (")[0]
         self.pick_setup(keep_value=True)
-        self.say("✔ Taken off the page." if remove else "✔ Put back.")
+        after = self.value_var.get().split("   (")[0]
+        text = "✔ Taken off the page." if remove else "✔ Put back."
+        if before and after != before:
+            text += f" {before} has no point left, so {after or 'nothing'} is shown."
+        self.say(text)
 
     # ---- saving
     def _export_name(self, ext: str) -> str:
@@ -425,6 +445,14 @@ class HistoryPage:
         return True
 
     def open_report(self):
+        old = getattr(self, "report_dialog", None)
+        try:
+            if old is not None and old.winfo_exists():
+                old.lift()
+                old.focus_set()
+                return
+        except tk.TclError:
+            pass
         st = self.setup()
         pick = st["path"] if st and st["kind"] == "system" else None
         self.report_dialog = ReportDialog(self.app, pick, event=parse_date(self.event_var.get()) or "")
@@ -592,11 +620,9 @@ class ReportDialog(tk.Toplevel):
         if event is None:
             self.say(f"✖ Event date: “{self.event_var.get().strip()}” is not a date (2026-10-30 or 30 Oct 2026).")
             return
-        if not self.save_optics(path, optics):
-            return
         share = self.share_var.get()
         try:
-            info = report.gather(path, prefs=self.app.prefs, event=event)
+            info = report.gather(path, prefs=self.app.prefs, event=event, optics_override=optics)
         except report.ReportError as exc:
             self.say(f"✖ {exc}")
             return
@@ -605,7 +631,16 @@ class ReportDialog(tk.Toplevel):
                                                     initialfile=report.default_name(info, share),
                                                     filetypes=[("PDF", "*.pdf")])
             if not out_path:
-                return
+                return                                  # nothing saved, the profile untouched
+        if not self.save_optics(path, optics):
+            return
+        try:
+            info = report.gather(path, prefs=self.app.prefs, event=event)
+        except report.ReportError as exc:
+            self.say(f"✖ {exc}")
+            return
+        report.prepare_fonts()                          # here, on the window's thread, before the worker draws
+        self.last_path = out_path
         self.make_btn.state(["disabled"])
         self.say("Making the report…")
 
@@ -629,7 +664,6 @@ class ReportDialog(tk.Toplevel):
             if not self.app.testing:
                 from flux_app import open_folder
                 open_folder(out_path)
-        self.last_path = out_path
         self.app.jobs.run(work, done, "Making the system report")
 
     def _say_safe(self, text):

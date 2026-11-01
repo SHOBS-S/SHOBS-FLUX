@@ -3,7 +3,8 @@
 Every save keeps the previous revision in the data folder's history/ (shobs_profile.save_profile). Rolling back
 saves the chosen revision's values as a NEW revision: the profile in use now goes to history/ like any other save, so
 a roll-back can itself be undone, and the revision number only ever goes up. The rolled-back profile says what it
-came from in "rolled_back" ({"to_revision", "from_revision", "on"}), shown on the Profiles page."""
+came from in "rolled_back" ({"to_revision", "from_revision", "as_revision", "on"}), shown on the Profiles page while
+that revision is the one in use (a later save keeps the key but has a higher revision, so it is no longer shown)."""
 from __future__ import annotations
 
 import os
@@ -100,10 +101,10 @@ def roll_back(path: str, revision_path: str, written_by: str = "") -> dict:
         raise RollbackError("That file is a revision of a different profile.")
     doc = dict(old)
     doc["profile_id"] = now.get("profile_id") or pid
-    doc["created"] = now.get("created") or old.get("created")
+    doc["created"] = now.get("created") or old.get("created") or sp.now_iso()
     doc["revision"] = int(now.get("revision") or 1) + 1
     doc["rolled_back"] = {"to_revision": old.get("revision"), "from_revision": now.get("revision"),
-                          "on": sp.now_iso()}
+                          "as_revision": doc["revision"], "on": sp.now_iso()}
     doc["updated"] = sp.now_iso()
     if written_by:
         doc["written_by"] = written_by

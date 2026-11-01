@@ -52,6 +52,9 @@ class TestHistoryWindow(TempData):
         hp.event_var.set("someday")
         hp.typed_dates()
         self.assertIn("is not a date", hp.msg_var.get())
+        hp.say("")
+        hp.typed_dates()                                       # leaving the box again, nothing changed: no new warning
+        self.assertEqual(hp.msg_var.get(), "")
         hp.event_var.set("")
         hp.range_var.set("These dates")
         hp.from_var.set("2026-10-19")
@@ -97,6 +100,10 @@ class TestHistoryWindow(TempData):
         self.assertIn("outside", dlg.msg_var.get())
         dlg.opt_vars["mirror_reflectivity"].set("88%")
         dlg.opt_vars["mirrors"].set("2")
+        from unittest import mock
+        with mock.patch("history_page.filedialog.asksaveasfilename", return_value=""):
+            dlg.make()                                        # the save box cancelled: the profile is untouched
+        self.assertEqual(sp.load(self.d["system_path"])["revision"], 1)
         dlg.event_var.set("19 Oct 2026")
         dlg.share_var.set(True)
         out = self.path("report.pdf")

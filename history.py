@@ -87,7 +87,12 @@ def connect() -> sqlite3.Connection:
         con.executescript(SCHEMA)
         cols = {r[1] for r in con.execute("PRAGMA table_info(runs)").fetchall()}
         if "removed" not in cols:                              # a version-1 database: add the column, keep every row
-            con.execute("ALTER TABLE runs ADD COLUMN removed INTEGER NOT NULL DEFAULT 0")
+            try:
+                con.execute("ALTER TABLE runs ADD COLUMN removed INTEGER NOT NULL DEFAULT 0")
+            except sqlite3.OperationalError:                   # another FLUX added it at the same moment
+                cols = {r[1] for r in con.execute("PRAGMA table_info(runs)").fetchall()}
+                if "removed" not in cols:
+                    raise
         con.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         con.commit()
     return con
@@ -229,7 +234,6 @@ def values_for(keys: tuple, profile_ids: list | None = None, limit: int = 2000) 
 # ---- the History page (0.5): setups, trend series, removing a run ----------------------------------------------------
 
 # What each value is called on the History page and in the system report, in the order the drop-down lists them.
-# (key, words, kind of run it comes from)
 VALUE_WORDS = {
     "bands.zero_point": "Zero point at airmass 1",
     "bands.zero_point_at_x": "Zero point at the night's airmass",
@@ -322,7 +326,9 @@ def setups() -> list[dict]:
     for r in _rows("SELECT DISTINCT system_id FROM runs WHERE system_id IS NOT NULL AND removed = 0"):
         sid = r["system_id"]
         if sid and not any(same_system(sid, s) for s in seen_sys):
-            out.append({"kind": "system", "id": sid, "words": f"{sid} (no profile saved)", "path": None})
+            _t, f, _c = parse_system_id(sid)
+            note = "no profile saved" + ("; no focal length in the headers" if not f else "")
+            out.append({"kind": "system", "id": sid, "words": f"{sid} ({note})", "path": None})
             seen_sys.append(sid)
     seen_cam = []
     for path in sp.list_profiles("cameras"):
@@ -377,7 +383,9 @@ def series_points(kind: str, sid: str, key: str | None = None, channel: str | No
     value and band: when a night was read more than once (a re-run, or the same log after SHOBS-P wrote it again) the
     newest run counts. Dates are YYYY-MM-DD and inclusive."""
     out: dict = {}
-    for r in _setup_rows(kind, sid, include_removed):
+    rows = _setup_rows(kind, sid, include_removed)
+    rows.sort(key=lambda r: bool(r.get("removed")))        # stable: live rows (newest first) before removed ones
+    for r in rows:
         if key is not None and r["key"] != key:
             continue
         if channel != "*" and (r["channel"] or None) != (channel or None):
@@ -444,4 +452,5 @@ def dtg(when=None) -> str:
     """A military Date Time Group, Zulu, as SHOBS-P stamps its files: "010345Z NOV 26"."""
     from datetime import datetime, timezone
     now = when or datetime.now(timezone.utc)
-    return now.strftime("%d%H%MZ ") + now.strftime("%b %y").upper()
+    month = ("JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC")[now.month - 1]
+    return now.strftime("%d%H%MZ ") + f"{month} {now:%y}"            # month in English whatever Windows' language

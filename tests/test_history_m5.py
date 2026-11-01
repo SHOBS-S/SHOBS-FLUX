@@ -279,3 +279,99 @@ class TestReport(TempData):
         info = report.gather(self.d["system_path"])
         self.assertTrue(report.default_name(info, True).endswith("(shared).pdf"))
         self.assertNotIn("/", report.default_name(info, False))
+
+
+class TestReviewFixes(TempData):
+    """The 0.5 review's findings, each pinned."""
+
+    def setUp(self):
+        super().setUp()
+        from tests import m5_data
+        self.d = m5_data.make(self.tmp)
+
+    def test_v1_values_and_logs_survive_upgrade(self):
+        con = sqlite3.connect(sp.runs_db_path())
+        con.execute("ALTER TABLE runs RENAME TO runs_v2")              # rebuild runs as version 1, keep its rows
+        con.execute("CREATE TABLE runs (id INTEGER PRIMARY KEY AUTOINCREMENT, run_key TEXT UNIQUE, kind TEXT NOT "
+                    "NULL, started TEXT NOT NULL, finished TEXT, app TEXT, camera_id TEXT, system_id TEXT, source "
+                    "TEXT, n_frames INTEGER, status TEXT, summary TEXT)")
+        con.execute("INSERT INTO runs SELECT id, run_key, kind, started, finished, app, camera_id, system_id, source, "
+                    "n_frames, status, summary FROM runs_v2")
+        con.execute("DROP TABLE runs_v2")
+        con.execute("INSERT INTO onsky_files (path, size, mtime) VALUES ('x.json', 1, 1.0)")
+        con.execute("PRAGMA user_version = 1")
+        con.commit()
+        n_vals = con.execute("SELECT COUNT(*) FROM run_values").fetchone()[0]
+        con.close()
+        pts = history.series_points("system", self.d["system_id"], "bands.zero_point", "TG")
+        self.assertEqual(len(pts), 2)
+        con = sqlite3.connect(sp.runs_db_path())
+        self.assertEqual(con.execute("SELECT COUNT(*) FROM run_values").fetchone()[0], n_vals)
+        self.assertEqual(con.execute("SELECT COUNT(*) FROM onsky_files").fetchone()[0], 1)
+        con.close()
+
+    def test_night_without_telescope_name_joins_its_setup(self):
+        import onsky
+        r = next(r for r in self.d["summary"].nights if r.ds.night == "2026-10-19")
+        anon = sp.system_id("", 2903, self.d["camera_id"])               # what the Sky page records with no name
+        self.assertTrue(anon.startswith("unknown-2903mm__"))
+        vals = onsky.night_values(r, anon)
+        for v in vals:
+            v["date"] = "2026-10-25"
+        history.record_run("onsky", "other.json", onsky.night_summary(r), camera_id=self.d["camera_id"],
+                           system_id=anon, values=vals)
+        dates = [p["date"] for p in history.series_points("system", self.d["system_id"], "bands.zero_point", "TG")]
+        self.assertIn("2026-10-25", dates)
+
+    def test_rolled_back_note_only_while_in_use(self):
+        import rollback
+        doc = rollback.roll_back(self.d["camera_path"], rollback.revisions(self.d["camera_path"])[0]["path"], "t")
+        self.assertEqual(doc["rolled_back"]["as_revision"], doc["revision"])
+        doc["values"]["read_noise_e"] = sp.record(1.3, "e-", "user")
+        sp.save_profile(doc, "t")                                       # an ordinary save after the roll-back
+        later = sp.load(self.d["camera_path"])
+        self.assertGreater(later["revision"], later["rolled_back"]["as_revision"])
+
+    def test_share_copy_scrubs_paths_in_notes(self):
+        import report
+        doc = sp.load(self.d["camera_path"])
+        doc["values"]["gain_e_per_adu"]["note"] = r"from C:\Users\kross\Downloads\specs.pdf"
+        sp.save_profile(doc, "t")
+        self.assertEqual(report.scrub(r"see C:\Users\kross\x.json"), "see (a file on the observer's computer)")
+        got = []
+        orig = report.Page._t
+
+        def spy(page, x, y, text, **kw):
+            t = orig(page, x, y, text, **kw)
+            got.append(t.get_text())
+            return t
+        report.Page._t = spy
+        try:
+            report.write_pdf(report.gather(self.d["system_path"]), self.path("s.pdf"), share=True, version="t")
+        finally:
+            report.Page._t = orig
+        text = " ".join(got)
+        self.assertNotIn("Users", text)
+        self.assertNotIn(self.tmp, text)
+
+    def test_no_budget_caveat_without_aperture(self):
+        import report
+        doc = sp.load(self.d["system_path"])
+        doc["telescope"]["aperture_mm"] = None
+        sp.save_profile(doc, "t")
+        info = report.gather(self.d["system_path"])
+        self.assertEqual(info["budgets"], [])
+        self.assertTrue(any("aperture is not known" in c for c in info["caveats"]))
+        report.write_pdf(info, self.path("n.pdf"), version="t")         # and the PDF still comes out
+
+    def test_locked_target_leaves_no_part_file(self):
+        import report
+        target = os.path.join(self.tmp, "a_folder.pdf")
+        os.makedirs(target)                                             # os.replace onto a folder fails
+        with self.assertRaises(OSError):
+            report.write_pdf(report.gather(self.d["system_path"]), target, version="t")
+        self.assertEqual([n for n in os.listdir(self.tmp) if n.endswith(".part")], [])
+
+    def test_dtg_month_in_english(self):
+        from datetime import datetime, timezone
+        self.assertEqual(history.dtg(datetime(2026, 10, 12, 11, 53, tzinfo=timezone.utc)), "121153Z OCT 26")

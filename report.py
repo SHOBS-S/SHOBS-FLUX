@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import math
 import os
+import re
+import tempfile
 import textwrap
 from datetime import datetime
 
@@ -61,6 +63,15 @@ BAND_ROWS = (("zero_point", "Zero point at airmass 1"), ("extinction_k", "Extinc
              ("fwhm_in_focus", "Seeing in focus (FWHM)"), ("fwhm_defocus", "Star size defocused"),
              ("sky_brightness", "Sky brightness"), ("scintillation_cy", "Scintillation C_Y"))
 SPEC_CURVE = {"gain_e_per_adu": "gain_e_per_adu", "read_noise_e": "read_noise_e", "full_well_e": "full_well_e"}
+
+
+def prepare_fonts() -> None:
+    """Call on the main thread before write_pdf runs in a worker: real text in the PDF (TrueType, searchable), and
+    matplotlib's font cache built here, not in two threads at once on a first run."""
+    import matplotlib
+    from matplotlib import font_manager
+    matplotlib.rcParams["pdf.fonttype"] = 42
+    font_manager.findfont(font_manager.FontProperties(family=matplotlib.rcParams["font.family"]))
 
 
 class ReportError(Exception):
@@ -121,7 +132,7 @@ def earlier_values(cam_path: str | None, key: str, now_rec) -> list[str]:
     kind, pid = os.path.basename(os.path.dirname(cam_path)), os.path.basename(cam_path)[:-5]
     out, seen = [], set()
     now_key = (sp.value_of(now_rec), (now_rec or {}).get("source")) if sp.is_record(now_rec) else None
-    for hp in reversed(sp.history_of(kind, pid)):
+    for hp in list(reversed(sp.history_of(kind, pid)))[:20]:          # the newest 20 are plenty (each save makes one)
         try:
             doc = sp.load(hp)
         except sp.ProfileError:
@@ -142,14 +153,15 @@ def earlier_values(cam_path: str | None, key: str, now_rec) -> list[str]:
 def optics_values(doc: dict, cam: dict | None, overrides: dict | None = None) -> dict:
     """Each budget input: {key: {"value", "how" ("profile" / "user" / "assumed" / "camera spec" …), "words"}}."""
     tel = dict(doc.get("telescope") or {})
-    tel.update({k: v for k, v in (overrides or {}).items() if v is not None})
+    overrides = {k: v for k, v in (overrides or {}).items() if v is not None}
+    tel.update(overrides)
     osc = ((cam or {}).get("camera") or {}).get("color") == "OSC" or \
         str(((cam or {}).get("camera") or {}).get("bayer_pattern") or "").upper() in ("RGGB", "BGGR", "GRBG", "GBRG")
     out = {}
     for key, words, default, why in OPTICS:
         v = _f(tel.get(key))
         if v is not None:
-            out[key] = {"value": v, "how": "user" if key in (overrides or {}) else "profile", "words": words}
+            out[key] = {"value": v, "how": "user" if key in overrides else "profile", "words": words}
             continue
         if key == "filter_transmission" and osc:
             out[key] = {"value": 1.0, "how": "one-shot color", "words": words,
@@ -340,6 +352,12 @@ def caveats(info: dict) -> list[str]:
     if typed:
         out.append("Camera values typed in rather than measured by FLUX: " + ", ".join(typed) + ". They come from "
                    "the operator or the maker and are used as given.")
+    with_budget = {b["band"] for b in info["budgets"]}
+    for bd in info["bands"]:
+        if sp.value_of(bd["recs"].get("zero_point")) is not None and bd["band"] not in with_budget:
+            why = ("the telescope's aperture is not known" if _f(info["telescope"].get("aperture_mm")) is None else
+                   "no photon zero point is known for this band")
+            out.append(f"{bd['words']}: no photon budget: {why}.")
     assumed = [v["words"] for v in info["optics"].values() if v["how"] == "assumed"]
     if assumed and info["budgets"]:
         out.append("Photon budget inputs assumed, not known: " + ", ".join(assumed).lower() + ". Type the real values "
@@ -376,6 +394,8 @@ class Page:
         self.heading(title, size=15)
 
     def _t(self, x_in, y_in, text, **kw):
+        if self.share:
+            text = scrub(text)
         return self.fig.text(x_in / PAGE_W, y_in / PAGE_H, text, **kw)
 
     def heading(self, text, size=12):
@@ -497,13 +517,23 @@ def _band_table_rows(bd):
     return [[r["words"], r["value"], r["source"], r["conditions"]] for r in bd["rows"]]
 
 
+PATH_RE = re.compile(r"(?:[A-Za-z]:[\\/]|\\\\|/home/|/Users/|/mnt/|~[\\/])\S*")
+
+
+def scrub(text: str) -> str:
+    """A shared copy never shows a file location on the observer's computer (whatever note or name holds one)."""
+    return PATH_RE.sub("(a file on the observer's computer)", str(text))
+
+
 def write_pdf(info: dict, path: str, share: bool = False, version: str = "") -> int:
     """Write the report; returns the number of pages. OSError when the file cannot be written (open elsewhere)."""
-    import matplotlib
     from matplotlib.backends.backend_pdf import PdfPages
 
+    import threading
+
     import trend_plots
-    matplotlib.rcParams["pdf.fonttype"] = 42                # real text in the PDF (searchable, copyable)
+    if threading.current_thread() is threading.main_thread():
+        prepare_fonts()                       # in a worker, the window already did (ReportDialog.make)
     tel, cam, mode = info["telescope"], info["camera"], info["mode"]
     pages = [0]
 
@@ -521,7 +551,22 @@ def write_pdf(info: dict, path: str, share: bool = False, version: str = "") -> 
             page = new_page(pdf, f"{title} (continued)")
             rows = rows[n:] if n else rows[1:]             # a row taller than a page is dropped, never looped on
 
-    tmp = path + ".part"
+    fd, tmp = tempfile.mkstemp(prefix=".report_", suffix=".pdf.part", dir=os.path.dirname(os.path.abspath(path)))
+    os.close(fd)
+    try:
+        _write(info, tmp, share, version, pages, new_page, table, tel, cam, mode, trend_plots, PdfPages)
+        os.replace(tmp, path)                          # fails when the old PDF is open in a viewer (Windows)
+    finally:
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+    return pages[0]
+
+
+def _write(info, tmp, share, version, pages, new_page, table, tel, cam, mode, trend_plots, PdfPages):
+    """The pages themselves (write_pdf handles the file)."""
     with PdfPages(tmp, metadata={"Title": report_title(info, share), "Creator": f"SHOBS-FLUX {version}"}) as pdf:
         # 1 summary
         p = new_page(pdf, "System report")
@@ -537,7 +582,7 @@ def write_pdf(info: dict, path: str, share: bool = False, version: str = "") -> 
         rows = [["Telescope", tel.get("name") or "—"],
                 ["Aperture", fmt(ap, "mm")],
                 ["Focal length", fmt(fl, "mm") + (f"  (f/{fl / ap:.2f})" if ap and fl else "")],
-                ["Central obstruction", fmt(_f(tel.get("central_obstruction_fraction")), "of the diameter")
+                ["Central obstruction", f"{_f(tel.get('central_obstruction_fraction')) * 100:.0f} % of the diameter"
                  if _f(tel.get("central_obstruction_fraction")) is not None else "not known"]]
         if tel.get("mount"):
             rows.append(["Mount and optics", tel["mount"]])
@@ -594,7 +639,8 @@ def write_pdf(info: dict, path: str, share: bool = False, version: str = "") -> 
         for r in info["cam_rows"]:
             other = list(r["earlier"])
             if _f(r["spec"]) is not None:
-                other.insert(0, f"spec {r['spec']:.4g} at gain {mode.get('gain_setting'):g}")
+                g = _f(mode.get("gain_setting"))
+                other.insert(0, f"spec {r['spec']:.4g}" + (f" at gain {g:g}" if g is not None else ""))
             rows.append([r["words"], r["value"], r["source"], "; ".join(other) or "—",
                          r["conditions"] + (f" ({r['note']})" if r["note"] else "")])
         p = table(pdf, p, "Camera", ["Value", "Now", "Source", "Other values", "Conditions"], rows,
@@ -610,9 +656,11 @@ def write_pdf(info: dict, path: str, share: bool = False, version: str = "") -> 
             p = table(pdf, p, "Camera", ["Value"] + list(info["per_channel"]), prow,
                       [w0] + [wc] * len(info["per_channel"]))
         lin = (info["cam"] or {}).get("linearity") or {}
-        if lin.get("max_deviation_pct") is not None:
-            p.para(f"Linearity: within {lin['max_deviation_pct']:g} % up to {lin.get('measured_to_fraction_of_full_scale', 0) * 100:.0f} % "
-                   f"of full scale ({lin.get('source')}, {lin.get('date')}).")
+        if _f(lin.get("max_deviation_pct")) is not None:
+            frac = _f(lin.get("measured_to_fraction_of_full_scale"))
+            p.para(f"Linearity: within {lin['max_deviation_pct']:g} %"
+                   + (f" up to {frac * 100:.0f} % of full scale" if frac is not None else "")
+                   + f" ({lin.get('source')}, {lin.get('date')}).")
         p.done()
 
         # 3 on sky, one page per band
@@ -764,5 +812,3 @@ def write_pdf(info: dict, path: str, share: bool = False, version: str = "") -> 
                 p.para(f"Camera profile: {info['camera_path']}", size=7.5, color=HINT)
             p.para(f"Run history: {history.db_path()}", size=7.5, color=HINT)
         p.done()
-    os.replace(tmp, path)
-    return pages[0]
