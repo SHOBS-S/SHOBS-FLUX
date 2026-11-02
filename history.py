@@ -429,6 +429,73 @@ def set_removed(run_key: str, removed: bool = True) -> bool:
         return False
 
 
+def _saved_profiles_texts(sid: str) -> list[str]:
+    """Every value's date and conditions in the system profiles of one setup: the current files and every revision
+    kept in history/ (a revision's file name starts with "systems__")."""
+    paths = list(sp.list_profiles("systems"))
+    hdir = sp.sub_dir("history", make=False)
+    if os.path.isdir(hdir):
+        paths += sorted(os.path.join(hdir, n) for n in os.listdir(hdir) if n.startswith("systems__")
+                        and n.endswith(".json"))
+    out = []
+    for path in paths:
+        try:
+            doc = sp.load(path)
+        except sp.ProfileError:
+            continue
+        if doc.get("format") != sp.SYSTEM_FORMAT or not same_system(doc.get("profile_id"), sid):
+            continue
+        for _where, rec in sp.iter_records(doc):
+            for k in ("date", "conditions"):
+                if rec.get(k):
+                    out.append(str(rec[k]))
+    return out
+
+
+def _names_night(text: str, night: str) -> bool:
+    """A value's date or conditions names a night: the date itself, or a range "A to B" that holds it."""
+    import re
+    if night in text:
+        return True
+    for a, b in re.findall(r"(\d{4}-\d{2}-\d{2}) to (\d{4}-\d{2}-\d{2})", text):
+        if a <= night <= b:
+            return True
+    return False
+
+
+def unsaved_folder_runs() -> list[dict]:
+    """On-sky runs FLUX 0.5.0 recorded for a folder of lights at Run time and that were never saved: the source is a
+    FLUX folder log (its file name holds "__flux-") and no system profile of the same setup, current or any
+    revision, has a value whose date or conditions names that run's night. [{"id", "run_key", "night", "log"}]."""
+    import re
+    rows = _rows("SELECT id, run_key, system_id, source, summary FROM runs WHERE kind = 'onsky' AND removed = 0")
+    texts: dict = {}
+    out = []
+    for r in rows:
+        log = re.split(r"[\\/]", str(r.get("source") or ""))[-1]
+        if "__flux-" not in log.lower():
+            continue
+        try:
+            summ = json.loads(r.get("summary") or "{}")
+        except (TypeError, ValueError):
+            summ = {}
+        night = str((summ if isinstance(summ, dict) else {}).get("night") or log[:10])
+        sid = r.get("system_id") or ""
+        if sid not in texts:
+            texts[sid] = _saved_profiles_texts(sid) if sid else []
+        if any(_names_night(t, night) for t in texts[sid]):
+            continue
+        out.append({"id": r["id"], "run_key": r["run_key"], "night": night, "log": log})
+    return out
+
+
+def remove_unsaved_folder_runs() -> list[dict]:
+    """The 0.5.1 clean-up: mark every unsaved folder run removed (nothing is deleted; History can put one back).
+    Returns the runs marked."""
+    got = unsaved_folder_runs()
+    return [r for r in got if set_removed(r["run_key"], True)]
+
+
 CSV_COLUMNS = ("date", "value", "sigma", "unit", "value_name", "band_or_channel", "target", "photometric", "run",
                "kind", "recorded")
 

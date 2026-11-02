@@ -200,8 +200,8 @@ class TestSkyPage(TempData):
         page.tree.selection_set(page.tree.get_children()[3])
         page.night_selected()
         self.assertIs(page.selected, r18)
-        # the run history: the three nights (the older run is not used)
-        self.assertEqual(len(onsky_rows()), 3)
+        # the run history: nothing at Run (0.5.1: History = what was used, recorded on Save)
+        self.assertEqual(len(onsky_rows()), 0)
         # save to the system profile (a new one)
         pid = sp.system_id("14in RC", 2900, "zwo-asi2600mc-air__g100__o50__bin1")
         page.save()
@@ -218,6 +218,7 @@ class TestSkyPage(TempData):
         self.assertEqual(doc["bands"]["TG"]["zero_point"]["source"], "measured")
         self.assertEqual(doc["learning"]["last_onsky_run"], page.run_key)
         self.assertIsNotNone(sp.find_system_profile("zwo-asi2600mc-air__g100__o50__bin1", 2905))
+        self.assertEqual(len(onsky_rows()), 3)                      # the three nights (the older run is not used)
         sky = [r for r in history.recent_runs(50) if r["kind"] == "sky"]
         self.assertEqual(len(sky), 1)
         self.assertEqual(sky[0]["run_key"], page.run_key)
@@ -239,7 +240,10 @@ class TestSkyPage(TempData):
         with open(r19.ds.path, "a", encoding="utf-8") as fh:
             fh.write(" ")
         self._run()
-        self.assertEqual(len(onsky_rows()), 4)
+        self.assertEqual(len(onsky_rows()), 3)                      # a Run alone records nothing
+        page.save()
+        [w for w in app.winfo_children() if isinstance(w, sky_page.SaveDialog)][-1].ok()
+        self.assertEqual(len(onsky_rows()), 4)                      # the re-written log, once, on Save
         # the profile now in place is what the Values tab compares with
         first = page.val_tree.get_children()[0]
         kid = page.val_tree.get_children(first)[0]
@@ -309,14 +313,16 @@ class TestSkyPage(TempData):
             page.color_var.set("Green (TG)")
             self._run()
         self.assertEqual(calls["run"], (folder, "TG", 300.0))
-        self.assertTrue(os.path.exists(calls["saved"]))
+        self.assertNotIn("saved", calls)                             # 0.5.1: the log is written on Save only
         nights = {r.ds.night: r for r in page.summary.nights}
         self.assertEqual(set(nights), {"2026-10-18", "2026-10-22"})
         self.assertEqual(nights["2026-10-22"].ds.source, "SHOBS-FLUX")
         row = page.tree.item(page.tree.get_children()[0])["values"]
         self.assertEqual(row[4], "FLUX")
+        # 0.5.1: the new run's night is selected: the folder's findings come first, then that night's
+        self.assertIs(page.selected, nights["2026-10-22"])
         text = page.text.get("1.0", "end")
-        self.assertLess(text.index("The folder of lights"), text.index("All nights"))
+        self.assertLess(text.index("The folder of lights"), text.index(nights["2026-10-22"].ds.label))
         self.assertLess(text.index("⚠ 3 lights"), text.index("60 lights read."))     # warnings first
         self.assertEqual(self.app.prefs["sky_source"], "folder")
 

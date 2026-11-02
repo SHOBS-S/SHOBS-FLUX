@@ -8,7 +8,10 @@ The logs can hold several cameras and telescopes: Setup picks one (camera settin
 aperture and site elevation are typed here (aperture and elevation are for scintillation; the site is never stored
 in a profile). Run reads every night of that setup (onsky.py has the whole method), lists the nights with what each
 says, draws them, and shows what the system profile would get; "Save to system profile…" writes it after showing what
-changes. Each night FLUX uses goes into the run history once (a log SHOBS-P writes again counts again)."""
+changes. Run is only a look: nothing goes into the run history and a folder run writes no log until Save; Save puts
+each night used into the run history once (a log SHOBS-P writes again counts again) and writes the folder run's log.
+A folder run says whether its frames are Photometry or Imaging (astrophotography, careful focus): an imaging run's
+star size is kept apart as "Seeing, imaging focus" (bands.<band>.fwhm_imaging), never the in-focus seeing."""
 from __future__ import annotations
 
 import json
@@ -36,6 +39,12 @@ COLOR_HINT = "for one-shot-color cameras; a mono camera uses its FILTER"
 FOCAL_TOL = 0.03                     # a log belongs to a setup when its focal length is within 3 % (plate solves)
 GREY = "#8a969c"
 OLD_RUN = "older run of this night (not counted)"
+FRAMES_ARE = (("Photometry", "photometry"), ("Imaging (astrophotography)", "imaging"))
+FRAMES_WORDS = {k: w for w, k in FRAMES_ARE}
+FRAMES_HINT = ("Imaging = guided long exposures focused with care: their star size is kept as “Seeing, imaging "
+               "focus”, apart from the photometry seeing. Zero point, extinction and sky count as usual.")
+CLEANUP_PREF = "cleanup_051_unsaved_folder_runs"     # the one-time clean-up of 0.5.1 has been done
+SCRATCH_PREF = "sky_scratch_logs"                    # folder-run logs never saved: not read again
 
 
 TEL_FIELDS = ("name", "aperture_mm", "elevation_m", "lat", "lon")
@@ -114,7 +123,17 @@ def log_info(path: str) -> dict:
         doc = sp.load(path)
     except sp.ProfileError as exc:
         return {"path": path, "why": f"it cannot be read: {exc}"}
-    if doc.get("format") != sp.ONSKY_FORMAT:
+    return doc_info(doc, path)
+
+
+def folder_log_path(doc: dict) -> str:
+    """Where a folder run's on-sky log goes when it is saved (the name sky_folder.save_log gives it)."""
+    return os.path.join(sp.onsky_dir(make=False), f"{doc['night']}__{sp.slug(doc['target'])}__{doc['run_id']}.json")
+
+
+def doc_info(doc, path: str = "") -> dict:
+    """log_info for a log already read (or still in memory)."""
+    if not isinstance(doc, dict) or doc.get("format") != sp.ONSKY_FORMAT:
         return {"path": path, "why": "it is not an on-sky log"}
     s = doc.get("setup") if isinstance(doc.get("setup"), dict) else {}
     cam = s.get("camera_id") or sp.camera_id(s.get("instrume") or "unknown camera", s.get("gain_setting"),
@@ -185,7 +204,39 @@ class SkyRun:
         self.source = "logs"
         self.folder = ""
         self.folder_lines: list = []     # the folder run's own findings
-        self.new_log = ""                # the log the folder run wrote
+        self.new_log = ""                # where the folder run's log goes (written only on Save)
+        self.new_doc = None              # that log, kept in memory until Save (a Run alone is a scratch look)
+        self.log_written = False
+        self.frames_are = "photometry"   # a folder run: "photometry" or "imaging" (astrophotography)
+        self.recorded = False            # its nights are in the run history (done on Save)
+
+
+def cleanup_unsaved_folder_runs(prefs: dict) -> list:
+    """Once, on the first start of 0.5.1: FLUX 0.5.0 put every folder-of-lights Run into the run history at once,
+    saved or not. Those never saved are marked removed (nothing is deleted; the History page can put one back), and
+    their on-sky logs are no longer read as nights. The marker in the settings makes it run once; flux.log says
+    what it did. Returns the runs marked."""
+    if prefs.get(CLEANUP_PREF):
+        return []
+    try:
+        got = history.remove_unsaved_folder_runs()
+    except Exception as exc:                              # never stops FLUX from opening; tried again next start
+        settings.log(f"0.5.1 clean-up of unsaved folder runs failed: {exc!r}")
+        return []
+    skip = [str(n) for n in (prefs.get(SCRATCH_PREF) or [])]
+    for r in got:
+        if r["log"] and r["log"] not in skip:
+            skip.append(r["log"])
+    prefs[SCRATCH_PREF] = skip
+    prefs[CLEANUP_PREF] = sp.now_iso()
+    settings.save(prefs)
+    if got:
+        settings.log("0.5.1 clean-up: " + _plural(len(got), "folder-of-lights run") + " never saved taken off the "
+                     "History page (nothing deleted): " + ", ".join(f"run {r['id']} ({r['night']}, {r['log']})"
+                                                                     for r in got))
+    else:
+        settings.log("0.5.1 clean-up: no unsaved folder-of-lights runs in the history")
+    return got
 
 
 # ---- the page --------------------------------------------------------------------------------------------------------
@@ -197,10 +248,12 @@ class SkyPage:
         self.app = app
         self.frame = ttk.Frame(parent, style="Card.TFrame")
         prefs = app.prefs
+        cleanup_unsaved_folder_runs(prefs)
         tel = shobs_p_telescope()
         self.source_var = tk.StringVar(value=SOURCE_WORDS.get(prefs.get("sky_source"), SOURCES[0][0]))
         self.folder_var = tk.StringVar(value=prefs.get("sky_folder") or "")
         self.color_var = tk.StringVar(value=COLOR_WORDS.get(prefs.get("sky_color"), COLORS[0][0]))
+        self.frames_are_var = tk.StringVar(value=FRAMES_ARE[0][0])      # per setup (kept with its Telescope boxes)
         self.name_var = tk.StringVar(value=prefs.get("sky_telescope_name") or tel.get("name") or "")
         self.aperture_var = tk.StringVar(value=_num(prefs.get("sky_aperture_mm")) or _num(tel.get("aperture_mm")))
         self.elevation_var = tk.StringVar(value=_num(prefs.get("sky_elevation_m")) or _num(tel.get("elevation_m")))
@@ -270,10 +323,20 @@ class SkyPage:
         self.color.pack(side=tk.LEFT, padx=(px(app, 6), px(app, 8)))
         self.color_hint = ttk.Label(crow, text=COLOR_HINT, style="Hint.TLabel")
         self.color_hint.pack(side=tk.LEFT)
+        arow = ttk.Frame(self.folder_row, style="Card.TFrame")
+        arow.pack(anchor="w", fill=tk.X, pady=(px(app, 4), 0))
+        ttk.Label(arow, text="These frames are", style="Card.TLabel").pack(side=tk.LEFT)
+        self.frames_are_box = ttk.Combobox(arow, textvariable=self.frames_are_var, state="readonly", width=26,
+                                           values=[w for w, _k in FRAMES_ARE])
+        self.frames_are_box.pack(side=tk.LEFT, padx=(px(app, 6), px(app, 8)))
+        self.frames_are_box.bind("<<ComboboxSelected>>", lambda _e: self._tel_store())
+        self.frames_hint = ttk.Label(self.folder_row, text=FRAMES_HINT, style="Hint.TLabel", justify=tk.LEFT)
+        self.frames_hint.pack(anchor="w", fill=tk.X)
         self.scan_label = ttk.Label(self.folder_row, textvariable=self.scan_var, style="Hint.TLabel", justify=tk.LEFT)
         self.scan_label.pack(anchor="w", fill=tk.X, pady=(px(app, 4), 0))
         src.bind("<Configure>", lambda e: (self.logs_label.configure(wraplength=max(200, e.width - px(app, 20))),
-                                           self.scan_label.configure(wraplength=max(200, e.width - px(app, 20)))),
+                                           self.scan_label.configure(wraplength=max(200, e.width - px(app, 20))),
+                                           self.frames_hint.configure(wraplength=max(200, e.width - px(app, 20)))),
                  add="+")
 
         self._entries = []
@@ -407,6 +470,7 @@ class SkyPage:
         for k, var in self._vars().items():
             t = var.get().strip()
             e[k] = t if k == "name" else sp._finite(t.replace(",", "")) if t else None
+        e["frames_are"] = self.frames_are
         settings.save(self.app.prefs)
 
     def _tel_switch(self, cam, focal, from_logs: bool) -> tuple | None:
@@ -445,6 +509,7 @@ class SkyPage:
         for k, var in self._vars().items():
             v = vals.get(k)
             var.set((v or "") if k == "name" else _num(v))
+        self.frames_are_var.set(FRAMES_WORDS.get(vals.get("frames_are"), FRAMES_ARE[0][0]))
         self._tel_owner = (cam, focal)
         return own
 
@@ -478,6 +543,11 @@ class SkyPage:
         return dict(COLORS).get(self.color_var.get(), "TG")
 
     @property
+    def frames_are(self) -> str:
+        """What a folder of lights holds: "photometry" (the default) or "imaging" (astrophotography)."""
+        return dict(FRAMES_ARE).get(self.frames_are_var.get(), "photometry")
+
+    @property
     def summary(self):
         return self.run_res.summary if self.run_res is not None else None
 
@@ -502,7 +572,7 @@ class SkyPage:
 
     def scan_logs(self) -> list:
         """Read what each log says about its setup (cached by size and time), fill the Setup drop-down."""
-        files = onsky.log_files()
+        files = self.log_files()
         infos = []
         for p in files:
             try:
@@ -680,10 +750,11 @@ class SkyPage:
                 return
             channel = self.channel
             site = self._site()
+            frames_are = self.frames_are
             self._busy()
 
             def work(step):
-                return self._folder_work(folder, channel, aperture, elevation, name, step, site)
+                return self._folder_work(folder, channel, aperture, elevation, name, step, site, frames_are)
 
             self.app.jobs.run(work, self.done, f"On-sky run on {os.path.basename(folder)}")
             return
@@ -706,41 +777,56 @@ class SkyPage:
 
         self.app.jobs.run(work, self.done, "On-sky run")
 
-    def _folder_work(self, folder, channel, aperture, elevation, name, step, site=None) -> SkyRun:
+    def _folder_work(self, folder, channel, aperture, elevation, name, step, site=None,
+                     frames_are: str = "photometry") -> SkyRun:
+        """A folder run is a scratch look: its on-sky log is kept in memory and written (and its night recorded in
+        the run history) only when the run is saved to the system profile. "History = everything used, not
+        everything I looked at" (John, 1 Nov 2026)."""
         import sky_folder
         res = SkyRun()
-        res.source, res.folder = "folder", folder
+        res.source, res.folder, res.frames_are = "folder", folder, frames_are
         fr = sky_folder.run_folder(folder, channel=channel, step=step, elevation_m=elevation, site=site)
         res.folder_lines = list(getattr(fr, "lines", None) or [])
         doc = getattr(fr, "doc", None)
         if not doc:
             return res
-        step("Writing the night's on-sky log")
-        res.new_log = sky_folder.save_log(doc)
-        info = log_info(res.new_log)
+        doc["frames_are"] = frames_are
+        res.new_doc = doc
+        res.new_log = folder_log_path(doc)
+        info = doc_info(doc, res.new_log)
         if info.get("why"):
-            raise onsky.OnSkyError(f"the log FLUX wrote cannot be read back: {info['why']}")
+            raise onsky.OnSkyError(f"the log FLUX made cannot be read back: {info['why']}")
         key = setup_key(info)
         res.key = key
         paths, bad = [], []
-        for p in onsky.log_files():
-            i = log_info(p) if p != res.new_log else info
+        for p in self.log_files():
+            if os.path.normcase(os.path.abspath(p)) == os.path.normcase(os.path.abspath(res.new_log)):
+                continue
+            i = log_info(p)
             if i.get("why"):
                 bad.append((p, i["why"]))
             elif setup_key(i)[0] == key[0]:
                 paths.append(p)                    # the focal length is checked on the datasets (3 %)
         res.bad = bad
-        self._learn(res, paths, aperture, elevation, name, step)
+        self._learn(res, paths, aperture, elevation, name, step, extra=[(doc, res.new_log)])
         return res
 
-    def _learn(self, res: SkyRun, paths, aperture, elevation, name, step):
-        """Read the setup's logs and learn from them (in the worker thread)."""
+    def log_files(self) -> list:
+        """The on-sky logs to learn from: every log in the onsky folder but the folder runs 0.5.0 wrote and never
+        saved (the 0.5.1 clean-up lists them; nothing is deleted)."""
+        skip = {str(n).lower() for n in (self.app.prefs.get(SCRATCH_PREF) or [])}
+        return [p for p in onsky.log_files() if os.path.basename(p).lower() not in skip]
+
+    def _learn(self, res: SkyRun, paths, aperture, elevation, name, step, extra=()):
+        """Read the setup's logs (and a folder run's log still in memory) and learn from them (worker thread)."""
         datasets = []
         for i, p in enumerate(paths):
             step(f"Reading on-sky log {i + 1} of {len(paths)}")
             got, bad = onsky.read_logs([p])
             datasets += got
             res.bad += bad
+        for doc, path in extra:
+            datasets.append(onsky.load_dataset(doc, path=path))
         datasets = [d for d in datasets if in_setup(d, res.key)] if res.key else datasets
         res.datasets = datasets
         if not datasets:
@@ -756,7 +842,7 @@ class SkyPage:
         self.source.configure(state="disabled")
         self.setup.configure(state="disabled")
         # what the run on its way reads (and Save later uses) stays as it is until the run is back
-        for w in [self.folder_btn, self.color] + self._entries:
+        for w in [self.folder_btn, self.color, self.frames_are_box] + self._entries:
             try:
                 w.configure(state="disabled")
             except tk.TclError:
@@ -773,6 +859,7 @@ class SkyPage:
                 pass
         try:
             self.color.configure(state="disabled" if self._mono else "readonly")
+            self.frames_are_box.configure(state="readonly")
         except tk.TclError:
             pass
 
@@ -816,13 +903,16 @@ class SkyPage:
         self.selected = None
         self.run_key = history.new_run_key("sky")
         self.sky_recorded = False
-        n_new = self._record_nights(res)
         s = res.summary
-        settings.log(f"on-sky run ({res.source}; {len(s.nights)} nights, {n_new} new in the history; "
-                     f"setup {res.key})")
+        # nothing goes into the run history here: a Run is a look; Save records what was used
+        settings.log(f"on-sky run ({res.source}; {_plural(len(onsky_nights(s.nights)), 'night')} from "
+                     f"{_plural(len(s.nights), 'run')}; recorded in the history only on Save; setup {res.key})")
         self.save_btn.configure(state="normal" if onsky.changes_for(s, None) else "disabled")
         try:
             self.show_all()
+            new = self.new_night(res)
+            if new is not None:                           # the plots and findings follow the run just made
+                self.select_night(new)
         except Exception as exc:                          # the run is learned and saveable even if a view fails
             import traceback
             settings.log(f"showing the on-sky run failed: {exc!r}\n{traceback.format_exc()}")
@@ -830,9 +920,37 @@ class SkyPage:
                       f"{settings.log_path()}.")
         self.app.set_status(status_text(s))
 
-    def _record_nights(self, res: SkyRun) -> int:
-        """Each night used goes into the run history once (keyed by its log's path, size and time)."""
-        pid = self.system_id(res, ask=False)
+    @staticmethod
+    def new_night(res: SkyRun):
+        """The NightResult of the folder run just made (None for a logs run, or when it gave no night)."""
+        if res is None or res.summary is None or res.source != "folder" or not res.new_log:
+            return None
+        want = os.path.normcase(os.path.abspath(res.new_log))
+        for r in res.summary.nights:
+            if r.ds.path and os.path.normcase(os.path.abspath(r.ds.path)) == want:
+                return r
+        return None
+
+    def _write_folder_log(self, res: SkyRun) -> bool:
+        """Write a saved folder run's on-sky log (it was kept in memory since Run). False when it could not be."""
+        if res.source != "folder" or res.new_doc is None or res.log_written:
+            return True
+        try:
+            import sky_folder
+            path = sky_folder.save_log(res.new_doc)
+        except Exception as exc:
+            self._say(f"✖ The night's on-sky log could not be written ({exc}); nothing was saved.")
+            return False
+        old = os.path.normcase(os.path.abspath(res.new_log))
+        for d in res.datasets:
+            if d.path and os.path.normcase(os.path.abspath(d.path)) == old:
+                d.path = path
+        res.new_log, res.log_written = path, True
+        return True
+
+    def _record_nights(self, res: SkyRun, pid: str | None = None) -> int:
+        """Each night used goes into the run history once (keyed by its log's path, size and time), on Save."""
+        pid = pid or self.system_id(res, ask=False)
         if pid is None and res.datasets:            # no telescope name yet: camera + focal still join it to its setup
             pid = sp.system_id("", focal_of(res.datasets), camera_of(res))
         n = 0
@@ -944,17 +1062,25 @@ class SkyPage:
         doc = onsky.apply_to_profile(s, old, settings.WRITTEN_BY, run_key, keep_user, system_id=pid, cam_id=cam,
                                      telescope=telescope, setup=ds.setup)
         doc["profile_id"] = pid
+        if not self._write_folder_log(res):
+            return
         try:
             path = sp.save_profile(doc, settings.WRITTEN_BY)
         except (sp.ProfileError, OSError) as exc:
             self._say(f"✖ The system profile could not be saved ({exc}).")
             return
+        if not res.recorded:                             # the nights used go into the run history now, once
+            n_new = self._record_nights(res, pid)
+            res.recorded = True
+            settings.log(f"on-sky run {run_key}: {n_new} night run{'s' if n_new != 1 else ''} new in the history")
         if not (self.sky_recorded and run_key == self.run_key):
             history.record_run("sky", res.folder or sp.onsky_dir(make=False), sky_summary(s), camera_id=cam,
                                system_id=pid, n_frames=sum(r.n_frames for r in s.nights), status=sky_status(s),
                                app=settings.WRITTEN_BY, values=sky_values(s, pid), run_key=run_key)
             self.sky_recorded = run_key == self.run_key
         settings.log(f"on-sky run {run_key} saved to {path}")
+        if res.log_written:
+            self.scan_logs()                             # the folder run's log is one of the setup's logs now
         self._say(f"✔ Saved to system profile {pid}" + (" (the previous revision is in the history folder)."
                                                          if old else "."))
         self.app.set_status(f"✔ System profile {pid} saved.")
@@ -1021,7 +1147,11 @@ class SkyPage:
             n += 1
         if res is not None:
             if self.selected is not None:
-                put("head", self.selected.ds.label)
+                if res.folder_lines and self.selected is self.new_night(res):
+                    put("head", f"The folder of lights ({os.path.basename(res.folder)})")
+                    for kind, line in sorted(res.folder_lines, key=lambda kl: order.get(kl[0], 3)):
+                        put(kind, line)
+                put("head", self.selected.ds.label + (" · imaging focus" if self.selected.imaging else ""))
                 for kind, line in sorted(self.selected.lines, key=lambda kl: order.get(kl[0], 3)):
                     put(kind, line)
             else:
@@ -1128,7 +1258,9 @@ def night_row(r, s) -> tuple:
         k = "—"
     if math.isfinite(r.fwhm_arcsec):
         see = f"{r.fwhm_arcsec:.2f}"
-        if r.defocused:
+        if r.imaging:
+            see += " imaging"
+        elif r.defocused:
             key = r.defocus_key or "defocused"
             see += " defocused" if key == "defocused" else f" defocus {key.replace(' steps', '')}"
     else:
@@ -1138,7 +1270,8 @@ def night_row(r, s) -> tuple:
     why = (bs.zp_out.get(f"{ds.night} {ds.target}") or bs.zp_out.get(ds.night)) if bs else None
     if not status and why and r.photometric:
         status = f"⚠ set aside: {why}"
-    return (ds.night, ds.target, ds.band, r.n_frames or len(ds.jd), _from(ds), _fmt(r.zp1, 3), k,
+    return (ds.night + (" imaging" if r.imaging else ""), ds.target, ds.band, r.n_frames or len(ds.jd), _from(ds),
+            _fmt(r.zp1, 3), k,
             ("marginal" if r.marginal else "✔") if r.photometric else "—", see, _fmt(r.sky_mag, 2), _fmt(r.cy, 2), _fmt(r.overhead_s, 1),
             status or "used")
 
@@ -1149,7 +1282,13 @@ def run_lines(res: SkyRun) -> list:
     out = []
     used = [r for r in s.nights if r.usable]
     phot = [r for r in used if r.photometric]
-    bits = [f"{_plural(len(s.nights), 'night')} read", f"{len(used)} used", f"{len(phot)} photometric"]
+    n_all, n_used, n_phot = (len(onsky_nights(x)) for x in (s.nights, used, phot))
+    bits = [f"{_plural(n_all, 'night')} read", f"{n_used} used", f"{n_phot} photometric"]
+    if len(s.nights) > n_all:
+        bits.append(f"from {_plural(len(s.nights), 'run')} (runs of the same night count as one night)")
+    img = onsky_nights([r for r in s.nights if r.imaging])
+    if img:
+        bits.append(f"{_plural(len(img), 'night')} of imaging focus")
     if s.replaced:
         bits.append(f"{_plural(len(s.replaced), 'older run')} of the same nights replaced (not counted)")
     out.append(("info", "Nights: " + ", ".join(bits) + "."))
@@ -1166,32 +1305,42 @@ def run_lines(res: SkyRun) -> list:
         if math.isfinite(b.k):
             parts.append(f"extinction {b.k:.3f} ± {b.k_sigma:.3f} from {_plural(len(b.k_nights), 'night')}")
         if math.isfinite(b.fwhm_in_focus):
-            parts.append(f"seeing {b.fwhm_in_focus:.2f}″ in focus")
-        for key, (v, _sg, _n) in sorted(b.fwhm_defocus.items()):
-            parts.append(f"{v:.2f}″ {'defocused' if key == 'defocused' else 'defocused ' + key}")
+            parts.append(f"seeing {b.fwhm_in_focus:.2f}″ in focus from {_plural(b.fwhm_in_focus_n, 'night')}")
+        if math.isfinite(b.fwhm_imaging):
+            parts.append(f"seeing {b.fwhm_imaging:.2f}″ at imaging focus from {_plural(b.fwhm_imaging_n, 'night')} "
+                         "(kept apart)")
+        for key, (v, _sg, n) in sorted(b.fwhm_defocus.items()):
+            parts.append(f"{v:.2f}″ {'defocused' if key == 'defocused' else 'defocused ' + key} from "
+                         f"{_plural(n, 'night')}")
         if math.isfinite(b.sky):
-            parts.append(f"sky {b.sky:.2f} mag/″²" + ("" if b.sky_dark else " (no dark-Moon night yet)"))
+            parts.append(f"sky {b.sky:.2f} mag/″² from {_plural(b.sky_n, 'night')}"
+                         + ("" if b.sky_dark else " (no dark-Moon night yet)"))
         if math.isfinite(b.cy):
-            parts.append(f"C_Y {b.cy:.2f}")
+            parts.append(f"C_Y {b.cy:.2f} from {_plural(b.cy_n, 'night')}")
         out.append(("info", f"{w[0].upper() + w[1:]}: the profile would get " + "; ".join(parts) + "."))
         for what, why in sorted(b.zp_out.items()):
             kind = "warn" if why.startswith("disagrees") else "info"
             out.append((kind, ("⚠ " if kind == "warn" else "") + f"{what} set aside for the zero point: {why}."))
     if math.isfinite(s.overhead_s):
-        out.append(("info", f"Overhead per frame {s.overhead_s:.1f} s: the lowest of "
-                            f"{_plural(s.overhead_runs, 'run')} ({s.overhead_from}). A delay you set in the capture "
+        out.append(("info", f"Overhead per frame {s.overhead_s:.1f} s: the lowest over "
+                            f"{_plural(s.overhead_runs, 'night')} ({s.overhead_from}). A delay you set in the capture "
                             "software only adds to it, so the quickest run is the camera's own."))
     out += list(s.lines)
     out.append(("info", "Pick a night in the list to see what it says."))
     return out
 
 
+def onsky_nights(results) -> list:
+    """The distinct nights of some night runs (several runs of one night, e.g. mosaic panels, are one night)."""
+    return sorted({r.ds.night for r in results}, reverse=True)
+
+
 def status_text(s) -> str:
     """The status line after a run: 'On-sky run: 3 nights (2 photometric); zero point TG 20.18 ± 0.02, k 0.194,
     seeing 5.2″.'"""
     used = [r for r in s.nights if r.usable]
-    n_phot = sum(1 for r in used if r.photometric)
-    head = f"On-sky run: {_plural(len(s.nights), 'night')} ({n_phot} photometric)"
+    n_phot = len(onsky_nights([r for r in used if r.photometric]))
+    head = f"On-sky run: {_plural(len(onsky_nights(s.nights)), 'night')} ({n_phot} photometric)"
     parts = []
     for band, b in sorted(s.bands.items(), key=lambda kv: -len(kv[1].zp_nights)):
         bits = []
@@ -1217,12 +1366,15 @@ def sky_summary(s) -> dict:
                        "k": n(b.k), "k_sigma": n(b.k_sigma), "k_nights": b.k_nights,
                        "fwhm_in_focus": n(b.fwhm_in_focus, 3),
                        "fwhm_defocus": {k: n(v[0], 3) for k, v in b.fwhm_defocus.items()},
+                       "fwhm_imaging": n(b.fwhm_imaging, 3),
                        "sky": n(b.sky, 3), "cy": n(b.cy, 3)}
     worst = next((f"⚠ {night} set aside: {why}" for b in s.bands.values() for night, why in b.zp_out.items()
                   if why.startswith("disagrees")), "")
     if not worst and not any(math.isfinite(b.zp1) for b in s.bands.values()):
         worst = "⚠ no photometric night yet"
-    return {"nights": len(s.nights), "photometric": sum(1 for r in s.nights if r.photometric),
+    return {"nights": len(onsky_nights(s.nights)), "runs": len(s.nights),
+            "photometric": len(onsky_nights([r for r in s.nights if r.photometric])),
+            "imaging_nights": len(onsky_nights([r for r in s.nights if r.imaging])),
             "replaced": len(s.replaced), "bands": bands, "overhead_s": n(s.overhead_s, 3), "worst": worst}
 
 
@@ -1273,13 +1425,29 @@ def scan_line(info) -> str:
     band = get("band") or get("filter")
     if band:
         bits.append(f"band {band}")
-    solved = get("solved")
-    if solved is not None:
-        bits.append("plate-solved" if solved else "no plate solution")
+    bits.append(solution_words(get))
     for k in ("night", "target"):
         if get(k):
             bits.append(str(get(k)))
-    return ", ".join(bits)
+    return ", ".join(b for b in bits if b)
+
+
+def solution_words(get) -> str:
+    """'plate-solved (TAN-SIP)', '11 of 12 plate-solved (TAN-SIP)', 'no plate solution', or '' when the scan does not
+    say. A folder counts as solved when ANY light carries a solution (the run uses them; ASIAIR often leaves the
+    last light of a sequence unsolved), not only when every one does."""
+    n_wcs, n, solved = get("n_wcs"), get("n_lights"), get("solved")
+    proj = get("projection") or ""
+    tail = f" ({proj})" if proj else ""
+    if isinstance(n_wcs, (int, float)) and not isinstance(n_wcs, bool):
+        if n_wcs <= 0:
+            return "no plate solution"
+        if isinstance(n, (int, float)) and 0 < n_wcs < n:
+            return f"{int(n_wcs)} of {int(n)} plate-solved{tail}"
+        return f"plate-solved{tail}"
+    if solved is None:
+        return f"plate-solved{tail}" if proj else ""
+    return f"plate-solved{tail}" if solved or proj else "no plate solution"
 
 
 class SaveDialog(tk.Toplevel):

@@ -8,7 +8,8 @@ Agg), 2 × 2:
                 frames after a meridian flip shaded;
   bottom left   every night: the zero point at airmass 1 with its error bar (filled = photometric and used, hollow =
                 set aside), the combined value as a line with its ± band;
-  bottom right  every night: the seeing (in focus = blue dots, defocused = orange triangles) and the in-focus median.
+  bottom right  every night: the seeing (in focus = blue dots, defocused = orange triangles, imaging focus = grey
+                hollow squares, kept out of the median) and the in-focus median.
 With no night selected the top row shows the newest night that has a zero point."""
 from __future__ import annotations
 
@@ -201,8 +202,12 @@ def _seeing_nights(ax, summary):
         _empty(ax, "no seeing measured yet")
         ax.set_xticks([])
         return
-    inf = [r for r in rs if not r.defocused]
-    dfc = [r for r in rs if r.defocused]
+    img = [r for r in rs if getattr(r, "imaging", False)]
+    inf = [r for r in rs if not r.defocused and r not in img]
+    dfc = [r for r in rs if r.defocused and r not in img]
+    if img:                          # astrophotography (careful focus): shown, never in the photometry median
+        ax.scatter([_day(r.ds.night) for r in img], [r.fwhm_arcsec for r in img], s=30, marker="s",
+                   facecolors="none", edgecolors=HINT, zorder=3, label="imaging focus")
     if inf:
         ax.scatter([_day(r.ds.night) for r in inf], [r.fwhm_arcsec for r in inf], s=28, color=BLUE, zorder=3,
                    label="in focus")

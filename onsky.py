@@ -126,6 +126,7 @@ class Dataset:
     segment: np.ndarray = None          # per frame: '' or 'flip' (SHOBS-P marks the frames after a meridian flip)
     cadence: dict | None = None         # a FLUX folder run's time between ALL its lights (it may measure every Nth)
     catalog_service: str = ""           # where the catalog magnitudes came from (a FLUX folder run says)
+    frames_are: str = "photometry"      # "photometry" or "imaging" (a FLUX folder run of astrophotography lights)
     n_frames_in_log: int = 0
     precalibrated: bool = False
     notes: list = field(default_factory=list)
@@ -178,6 +179,11 @@ class NightResult:
     overhead_n: int = 0
     interval_s: float = float("nan")                   # median time from one frame to the next
     exptime_s: float = float("nan")
+
+    @property
+    def imaging(self) -> bool:
+        """Frames shot for astrophotography (careful focus): their star size is the imaging-focus seeing only."""
+        return self.ds.frames_are == "imaging"
 
     @property
     def worst(self) -> str:
@@ -319,6 +325,9 @@ def load_dataset(path_or_doc, cam_lookup=None, path: str = "") -> Dataset:
         segment=np.array([str(f.get("segment") or "") for f in keep], dtype=object),
         cadence=doc.get("cadence") if isinstance(doc.get("cadence"), dict) else None,
         catalog_service=str(doc.get("catalog_service") or ""), n_frames_in_log=len(frames_in), precalibrated=pre)
+    # imaging focus (guided astrophotography) is said only by a FLUX folder run; SHOBS-P's logs are photometry
+    if ds.source == "SHOBS-FLUX" and str(doc.get("frames_are") or "").lower() == "imaging":
+        ds.frames_are = "imaging"
     if not ds.night and nf:
         ds.night = night_of(float(np.nanmin(ds.jd)))
     return ds
@@ -881,7 +890,11 @@ class BandSummary:
     fwhm_in_focus: float = float("nan")
     fwhm_in_focus_sigma: float = float("nan")
     fwhm_in_focus_n: int = 0
-    fwhm_defocus: dict = field(default_factory=dict)    # key → (value, sigma, n)
+    fwhm_defocus: dict = field(default_factory=dict)    # key → (value, sigma, n nights)
+    fwhm_imaging: float = float("nan")                  # imaging focus (astrophotography runs), kept apart
+    fwhm_imaging_sigma: float = float("nan")
+    fwhm_imaging_n: int = 0
+    fwhm_imaging_last: str = ""
     zp_marginal_only: bool = False                      # the zero point rests on marginal (drifting) nights only
     sky: float = float("nan")
     sky_sigma: float = float("nan")
@@ -901,7 +914,7 @@ class Summary:
     overhead_s: float = float("nan")
     overhead_sigma: float = float("nan")
     overhead_n: int = 0
-    overhead_runs: int = 0
+    overhead_runs: int = 0                              # NIGHTS with an overhead (the lowest run of them counts)
     overhead_from: str = ""
     camera_ids: list = field(default_factory=list)
     lines: list = field(default_factory=list)
@@ -922,13 +935,38 @@ def _by_night(results, value, sigma):
     return out
 
 
+def _night_medians(results, value, keep=lambda r: True, pair=None) -> list:
+    """One value per night: the median of that night's runs (mosaic panels, or a night read twice, count once).
+    With pair: [(value, median of pair(r))] per night."""
+    groups: dict = {}
+    for r in results:
+        v = value(r)
+        if keep(r) and v is not None and math.isfinite(v):
+            groups.setdefault(r.ds.night, []).append(r)
+    out = []
+    for _night, rs in sorted(groups.items()):
+        v = float(np.median([value(r) for r in rs]))
+        if pair is None:
+            out.append(v)
+        else:
+            p = [pair(r) for r in rs if pair(r) is not None and math.isfinite(pair(r))]
+            out.append((v, float(np.median(p)) if p else float("nan")))
+    return out
+
+
 def _defocus_keys(results: list, profile: dict | None = None) -> None:
     """Defocused runs keyed by the focuser offset from the same night's in-focus run (else "defocused").
 
     A run alone on its night has no in-focus partner to compare with. It is judged against the setup's own seeing
     instead of a flat 7″: the in-focus FWHM of the other nights (else the system profile's) and the size of each
     known defocus ("+125 steps"). Whichever it is nearest (in ratio) decides: a known defocus within 25 % names it,
-    in focus keeps it in focus, and only with nothing to compare against does the flat DEFOCUS_ARCSEC rule stand."""
+    in focus keeps it in focus, and only with nothing to compare against does the flat DEFOCUS_ARCSEC rule stand.
+
+    Imaging runs (astrophotography, careful focus) take no part: never called defocused, never a reference."""
+    for r in results:
+        if r.imaging:
+            r.defocused, r.defocus_key = False, ""
+    results = [r for r in results if not r.imaging]
     nights: dict = {}
     for r in results:
         if math.isfinite(r.fwhm_arcsec):
@@ -1089,22 +1127,27 @@ def combine(results: list, replaced: list | None = None, old_profile: dict | Non
             bs.zp1, bs.zp1_sigma = wmean([v for (_, v, _, _), k in zip(zn, keep) if k],
                                          [s for (_, _, s, _), k in zip(zn, keep) if k])
             bs.zp_nights = [n for (n, _, _, _), k in zip(zn, keep) if k]
-        # seeing
-        inf = [r.fwhm_arcsec for r in rs if math.isfinite(r.fwhm_arcsec) and not r.defocused]
+        # seeing: each night once (several runs that night, e.g. mosaic panels: their median first). Imaging-focus
+        # runs (astrophotography) are a value of their own, never the photometry seeing.
+        inf = _night_medians(rs, lambda r: r.fwhm_arcsec, lambda r: not r.defocused and not r.imaging)
         if inf:
             bs.fwhm_in_focus, bs.fwhm_in_focus_sigma, bs.fwhm_in_focus_n = float(np.median(inf)), rsigma(inf), len(inf)
-        keys: dict = {}
-        for r in rs:
-            if math.isfinite(r.fwhm_arcsec) and r.defocused:
-                keys.setdefault(r.defocus_key or "defocused", []).append(r.fwhm_arcsec)
-        bs.fwhm_defocus = {k: (float(np.median(v)), rsigma(v), len(v)) for k, v in keys.items()}
-        # sky: the dark nights when there are any
-        sk = [(r.sky_mag, r.moon_illum) for r in rs if math.isfinite(r.sky_mag)]
+        img = _night_medians(rs, lambda r: r.fwhm_arcsec, lambda r: r.imaging)
+        if img:
+            bs.fwhm_imaging, bs.fwhm_imaging_sigma, bs.fwhm_imaging_n = float(np.median(img)), rsigma(img), len(img)
+            bs.fwhm_imaging_last = max(r.ds.night for r in rs if r.imaging and math.isfinite(r.fwhm_arcsec))
+        bs.fwhm_defocus = {}
+        for dk in sorted({r.defocus_key or "defocused" for r in rs if r.defocused and math.isfinite(r.fwhm_arcsec)}):
+            v = _night_medians(rs, lambda r: r.fwhm_arcsec,
+                               lambda r, dk=dk: r.defocused and (r.defocus_key or "defocused") == dk)
+            bs.fwhm_defocus[dk] = (float(np.median(v)), rsigma(v), len(v))
+        # sky: the dark nights when there are any (each night once)
+        sk = _night_medians(rs, lambda r: r.sky_mag, pair=lambda r: r.moon_illum)
         dark = [s for s, m in sk if math.isfinite(m) and m < DARK_MOON]
         use = dark or [s for s, _ in sk]
         if use:
             bs.sky, bs.sky_sigma, bs.sky_n, bs.sky_dark = float(np.median(use)), rsigma(use), len(use), bool(dark)
-        cys = [r.cy for r in rs if math.isfinite(r.cy)]
+        cys = _night_medians(rs, lambda r: r.cy)
         if cys:
             bs.cy, bs.cy_sigma, bs.cy_n = float(np.median(cys)), rsigma(cys), len(cys)
         out[band] = bs
@@ -1115,7 +1158,7 @@ def combine(results: list, replaced: list | None = None, old_profile: dict | Non
     oh = [(r.overhead_s, r.overhead_n, r) for r in usable if math.isfinite(r.overhead_s)]
     if oh:
         v, n, best = min(oh, key=lambda t: t[0])
-        s.overhead_s, s.overhead_n, s.overhead_runs = v, n, len(oh)
+        s.overhead_s, s.overhead_n, s.overhead_runs = v, n, len({r.ds.night for _v, _n, r in oh})
         s.overhead_from = f"{best.ds.night} {best.ds.target}, {best.exptime_s:g} s exposures"
     s.camera_ids = sorted({r.ds.camera_id for r in results})
     return s
@@ -1204,6 +1247,14 @@ def measured_records(s: Summary, run_key: str | None = None) -> tuple[dict, dict
                                               sigma=_rnd(b.fwhm_in_focus_sigma, 2), n=b.fwhm_in_focus_n,
                                               date=b.last_night, conditions="median of the nights' medians",
                                               run=run_key)
+        if math.isfinite(b.fwhm_imaging):
+            recs["fwhm_imaging"] = sp.record(_rnd(b.fwhm_imaging, 2), "arcsec", "measured",
+                                             sigma=_rnd(b.fwhm_imaging_sigma, 2), n=b.fwhm_imaging_n,
+                                             date=b.fwhm_imaging_last or b.last_night,
+                                             conditions="imaging focus (astrophotography): median of the nights' "
+                                             "medians", run=run_key,
+                                             note="kept apart from the photometry seeing; never the in-focus "
+                                             "reference for defocus")
         if b.fwhm_defocus:
             recs["fwhm_defocus"] = {k: sp.record(_rnd(v, 2), "arcsec", "measured", sigma=_rnd(sg, 2), n=n,
                                                  date=b.last_night, conditions="median of the nights' medians",
@@ -1220,7 +1271,8 @@ def measured_records(s: Summary, run_key: str | None = None) -> tuple[dict, dict
     last = max((r.ds.night for r in s.nights), default=None)
     if math.isfinite(s.overhead_s):
         cad["overhead_s"] = sp.record(_rnd(s.overhead_s, 2), "s", "measured", n=s.overhead_n, date=last,
-                                      conditions=f"lowest of {s.overhead_runs} run{'s' if s.overhead_runs != 1 else ''}"
+                                      conditions=f"lowest of {s.overhead_runs} "
+                                      f"night{'s' if s.overhead_runs != 1 else ''}"
                                       f" ({s.overhead_from})", run=run_key,
                                       note="time between frames minus the exposure (gaps left out); a delay set in "
                                       "the capture software only adds to it, so the lowest run counts")
@@ -1229,7 +1281,7 @@ def measured_records(s: Summary, run_key: str | None = None) -> tuple[dict, dict
 
 LABELS = {"zero_point": ("Zero point", "mag (1 e⁻/s)", 3), "extinction_k": ("Extinction", "mag/airmass", 3),
           "sky_brightness": ("Sky", "mag/″²", 2), "fwhm_in_focus": ("Seeing in focus", "″", 2),
-          "fwhm_defocus": ("Defocused", "″", 2), "scintillation_cy": ("Scintillation C_Y", "", 2),
+          "fwhm_defocus": ("Defocused", "″", 2), "fwhm_imaging": ("Seeing, imaging focus", "″", 2), "scintillation_cy": ("Scintillation C_Y", "", 2),
           "overhead_s": ("Overhead per frame", "s", 2)}
 
 
@@ -1333,7 +1385,8 @@ def night_values(r: NightResult, system_id: str) -> list:
     add("bands.zero_point_at_x", r.zp_mean, "mag for 1 e-/s")
     add("bands.extinction_k", r.k, "mag/airmass", r.k_sigma)
     add("bands.sky_brightness", r.sky_mag, "mag/arcsec2")
-    add("bands.fwhm_defocus" if r.defocused else "bands.fwhm_in_focus", r.fwhm_arcsec, "arcsec", r.fwhm_sigma)
+    add("bands.fwhm_imaging" if r.imaging else "bands.fwhm_defocus" if r.defocused else "bands.fwhm_in_focus",
+        r.fwhm_arcsec, "arcsec", r.fwhm_sigma)
     add("bands.scintillation_cy", r.cy, "Young C_Y")
     add("cadence.overhead_s", r.overhead_s, "s")
     add("cadence.interval_s", r.interval_s, "s")
@@ -1350,5 +1403,5 @@ def night_summary(r: NightResult) -> dict:
             "x_mean": n(r.x_mean, 3), "k": n(r.k), "k_used": n(r.k_used), "k_used_source": r.k_used_source,
             "photometric": r.photometric, "marginal": r.marginal, "trend": n(r.trend), "bin_rms": n(r.bin_rms), "fwhm_arcsec": n(r.fwhm_arcsec, 3),
             "defocus": r.defocus_key if r.defocused else "", "sky": n(r.sky_mag, 3), "moon": n(r.moon_illum, 3),
-            "cy": n(r.cy, 3), "overhead_s": n(r.overhead_s, 3), "why_not": r.why_not,
+            "cy": n(r.cy, 3), "overhead_s": n(r.overhead_s, 3), "why_not": r.why_not, "frames_are": r.ds.frames_are,
             "worst": worst if worst else ("⚠ not photometric" if r.usable and not r.photometric else "")}

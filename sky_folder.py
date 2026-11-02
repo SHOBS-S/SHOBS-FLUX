@@ -97,6 +97,17 @@ def has_wcs(h: dict) -> bool:
     return c1.startswith("RA--") and c2.startswith("DEC-")
 
 
+def projection_of(h: dict) -> str:
+    """The plate solution's projection as the header names it: 'TAN', 'TAN-SIP', 'TPV'… ('' when none)."""
+    if not has_wcs(h):
+        return ""
+    c1 = str(h.get("CTYPE1") or "").upper()
+    proj = c1[5:].strip("-").strip() or "TAN"           # 'RA---TAN-SIP' → 'TAN-SIP'
+    if "SIP" not in proj and any(k in h for k in ("A_ORDER", "B_ORDER")):
+        proj += "-SIP"                                   # SIP terms without the CTYPE suffix (astropy reads them so)
+    return proj
+
+
 def wcs_of(h: dict):
     """astropy WCS from a header dict (celestial part), or None."""
     if not has_wcs(h):
@@ -225,7 +236,8 @@ def scan(folder: str) -> dict:
     """A quick look at a folder (headers only) for the Sky page before Run: {"folder", "n_files", "n_lights",
     "others" {kind: count}, "osc" (True / False), "bayer", "filters" {FILTER: count}, "bands" {band: count},
     "band" (mono: the band a run measures; None for color, where the page's color choice decides),
-    "n_wcs" (lights with a plate solution), "has_wcs" = "solved" (all of them), "has_pointing", "target", "night",
+    "n_wcs" (lights with a plate solution), "has_wcs" = "solved" (all of them), "projection" ('TAN', 'TAN-SIP', ''
+    for none; 'TAN-SIP/TAN' when they differ, the most common first), "has_pointing", "target", "night",
     "exposures" [s], "camera", "camera_id" (the setup's camera id), "focal" (median FOCALLEN, mm, or None),
     "lines" [(kind, text)]}. SkyFolderError when there are no light frames."""
     if not folder or not os.path.isdir(folder):
@@ -244,6 +256,8 @@ def scan(folder: str) -> dict:
     filters = Counter(str(h.get("FILTER") or "").strip() or "none" for h in heads)
     bands = Counter("TG" if osc else catalogs.band_of_filter(h.get("FILTER")) for h in heads)
     n_wcs = sum(1 for h in heads if has_wcs(h))
+    projs = Counter(p for p in (projection_of(h) for h in heads) if p)
+    projection = "/".join(p for p, _n in projs.most_common())
     jds = [j for j in (jd_mid_of(h) for h in heads[:1] + heads[-1:]) if j]
     night = onsky.night_of(min(jds)) if jds else ""
     target = Counter(_str(h, "OBJECT") or "" for h in heads).most_common(1)[0][0] or os.path.basename(
@@ -264,7 +278,12 @@ def scan(folder: str) -> dict:
         lines.append(("warn", f"⚠ The frames hold {len(bands)} filters; the run uses the most common one "
                               f"({onsky.BAND_WORDS.get(b, b)}, {n} frames)."))
     if n_wcs == len(heads):
-        lines.append(("info", "Every frame has a plate solution in its header."))
+        lines.append(("info", f"Every frame has a plate solution ({projection}) in its header."))
+    elif n_wcs:
+        # ASIAIR, for one, often leaves the last light of a sequence unsolved: the run uses the solutions there are
+        # (a frame without one is placed by its stars from the frame before)
+        lines.append(("info", f"{n_wcs} of {len(heads)} frames have a plate solution ({projection}) in their "
+                              "header; the others are placed from their stars."))
     elif not pointing:
         lines.append(("bad", "✖ The frames have no plate solution and no RA/DEC: FLUX cannot tell where they point."))
     else:
@@ -272,7 +291,7 @@ def scan(folder: str) -> dict:
     return {"folder": folder, "n_files": len(files), "n_lights": len(lights), "others": dict(others), "osc": osc,
             "bayer": None if not osc else bayer, "filters": dict(filters), "bands": dict(bands),
             "band": None if osc else bands.most_common(1)[0][0], "n_wcs": n_wcs, "has_wcs": n_wcs == len(heads),
-            "solved": n_wcs == len(heads), "has_pointing": bool(pointing), "target": target, "night": night,
+            "solved": n_wcs == len(heads), "projection": projection, "has_pointing": bool(pointing), "target": target, "night": night,
             "exposures": exps, "camera": cam, "camera_id": cam_id, "focal": focal, "lines": lines}
 
 
