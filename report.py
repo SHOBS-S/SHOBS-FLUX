@@ -19,7 +19,7 @@ import os
 import re
 import tempfile
 import textwrap
-from datetime import datetime
+from datetime import datetime, timezone
 
 import history
 import onsky
@@ -36,6 +36,11 @@ JY = 1e-26                  # W m⁻² Hz⁻¹
 _VEGA = {"U": (756.0, 680.0), "B": (1392.0, 980.0), "V": (995.5, 890.0), "R": (702.0, 1380.0), "I": (452.0, 1490.0)}
 _SLOAN = {"SU": (355.7, 59.9), "SG": (482.5, 137.9), "SR": (626.1, 138.2), "SI": (767.2, 153.5), "SZ": (909.7, 137.0)}
 PHOTONS_MAG0 = {b: f * w * 1e4 for b, (f, w) in _VEGA.items()}
+# Each catalog band's span in nm, for reading the maker's QE curve over the band (a top-hat, centre ± width / 2):
+# Johnson–Cousins from Bessell 1990/1998's effective wavelength and the width above (Å → nm); Sloan as above.
+_VEGA_CENTRE = {"U": 366.0, "B": 438.0, "V": 545.0, "R": 641.0, "I": 798.0}
+BAND_RANGE_NM = {b: (_VEGA_CENTRE[b] - w / 20.0, _VEGA_CENTRE[b] + w / 20.0) for b, (_f, w) in _VEGA.items()}
+BAND_RANGE_NM.update({b: (lam - w / 2.0, lam + w / 2.0) for b, (lam, w) in _SLOAN.items()})
 PHOTONS_MAG0.update({b: 3631.0 * JY * (w / lam) / H for b, (lam, w) in _SLOAN.items()})
 BAND_SYSTEM = {**{b: "Vega (Bessell 1998)" for b in _VEGA}, **{b: "AB (3631 Jy)" for b in _SLOAN}}
 
@@ -50,10 +55,14 @@ OPTICS = (
     ("filter_transmission", "Filter transmission in the band", 0.90, "a good interference filter"),
     ("qe_in_band", "Camera QE in the band", None, "the camera's peak QE"),
 )
+CURVE_HOW = "maker's QE curve"
 # One-shot-color bands: FLUX counts only the pixels of that color (RGGB: half are green, a quarter red, a quarter
 # blue), so only that share of the light falling in the aperture can become counted electrons.
 BAYER_SHARE = {"TG": 0.5, "TR": 0.25, "TB": 0.25}
-COAT_WORDS = {"user": "typed in the report window", "profile": "set for this system", "assumed": "assumed"}
+# where each budget input came from, in the report's words (a value typed in the report window is kept in the system
+# profile, so "profile" is a typed value too)
+COAT_WORDS = {"user": "entered by hand", "profile": "entered by hand", "assumed": "assumed"}
+NO_MIRRORS = "0 mirrors (refractor or lens: no mirror losses)"
 
 CAMERA_ROWS = (("gain_e_per_adu", "Gain"), ("read_noise_e", "Read noise"), ("full_well_e", "Full well"),
                ("saturation_adu", "Saturation"), ("linear_limit_adu", "Linear limit"),
@@ -82,15 +91,32 @@ def _f(v):
     return sp._finite(v)
 
 
+def num(v, nd: int = 4) -> str:
+    """A number for the report: about nd significant figures, never in e-notation, and with thousands separators
+    from 1,000 up (15,800 · 65,535); '—' when unknown."""
+    v = _f(v)
+    if v is None:
+        return "—"
+    if abs(v) >= 1000:
+        return f"{v:,.0f}"
+    if v == 0:
+        return "0"
+    txt = f"{v:.{nd}g}"
+    if "e" in txt:                                     # 2.2e-05 → 0.000022
+        dec = nd - 1 - math.floor(math.log10(abs(v)))
+        txt = f"{v:.{dec}f}".rstrip("0").rstrip(".")
+    return txt
+
+
 def fmt(v, unit: str = "", nd: int = 4, sigma=None) -> str:
     """A number to about nd significant figures with its ± and unit; '—' when unknown."""
     v = _f(v)
     if v is None:
         return "—"
-    txt = f"{v:,.0f}" if abs(v) >= 10 ** nd else f"{v:.{nd}g}"
+    txt = num(v, nd)
     s = _f(sigma)
     if s is not None and s > 0:
-        txt += f" ± {s:.2g}"
+        txt += f" ± {num(s, 2)}"
     return f"{txt} {unit}".strip()
 
 
@@ -101,7 +127,9 @@ def rec_words(rec) -> str:
 
 
 # The report is read by other people too: "typed by you" would name the reader, so a typed value is "entered by hand".
-REPORT_SOURCE_WORDS = {**sp.SOURCE_WORDS, "user": "entered by hand"}
+# Short words, so the Source columns never split a word ("manufacturer" / "'s spec" in 0.5.0).
+REPORT_SOURCE_WORDS = {**sp.SOURCE_WORDS, "user": "entered by hand", "spec": "maker's spec",
+                       "header": "FITS header"}
 
 
 def source_words(rec) -> str:
@@ -150,8 +178,93 @@ def earlier_values(cam_path: str | None, key: str, now_rec) -> list[str]:
     return out[:3]
 
 
-def optics_values(doc: dict, cam: dict | None, overrides: dict | None = None) -> dict:
-    """Each budget input: {key: {"value", "how" ("profile" / "user" / "assumed" / "camera spec" …), "words"}}."""
+_FIND = object()
+
+
+def _curve_points(curves: dict, name: str):
+    pts = curves.get(name)
+    if not isinstance(pts, list):
+        return None
+    out = sorted((float(p[0]), float(p[1])) for p in pts if isinstance(p, (list, tuple)) and len(p) == 2
+                 and _f(p[0]) is not None and _f(p[1]) is not None)
+    return out if len(out) >= 2 else None
+
+
+def band_qe(spec: dict | None, band: str, cam: dict | None = None) -> dict | None:
+    """The camera's QE averaged over one band, from the maker's QE curve in the spec ("qe_relative": per Bayer color,
+    in percent of the peak, times the peak QE; or one curve for a mono sensor). The band's light is taken as a
+    top-hat over its catalog band (V: 500–590 nm); a one-shot-color band (TG / TR / TB) reads its own color's curve,
+    a clear or filter band on a one-shot-color camera the RGGB mix (R + 2 G + B) / 4. None when the spec has no
+    curve, the curve does not reach the band, or a relative curve has no peak QE to scale it.
+    Returns {"value", "color", "range_nm", "peak", "words"}."""
+    import numpy as np
+    curves = (spec or {}).get("qe_relative") or (spec or {}).get("qe") or {}
+    if not isinstance(curves, dict):
+        return None
+    cat = onsky.BAND_CATALOG.get(band, band)
+    rng = BAND_RANGE_NM.get(cat)
+    if rng is None:
+        return None
+    color = (onsky.BAND_COLOR.get(band) or (None,))[0]
+    names = [k for k in curves if _curve_points(curves, k)]
+    if not names:
+        return None
+    if color in ("R", "G", "B") and color in names:
+        use, label = [(color, 1.0)], f"the {color} curve"
+    elif all(c in names for c in ("R", "G", "B")):
+        use, label = [("R", 0.25), ("G", 0.5), ("B", 0.25)], "the RGGB mix of the curves"
+    else:
+        one = next((k for k in ("L", "mono", "Mono", "QE", "qe") if k in names), names[0] if len(names) == 1 else None)
+        if one is None:
+            return None
+        use, label = [(one, 1.0)], "the curve"
+    lo, hi = rng
+    for name, _w in use:                                  # the part of the band every curve used covers
+        pts = _curve_points(curves, name)
+        lo, hi = max(lo, pts[0][0]), min(hi, pts[-1][0])
+    if hi - lo < 0.75 * (rng[1] - rng[0]):
+        return None                                       # the curve misses too much of the band
+    xs = np.linspace(lo, hi, 181)
+    total = np.zeros_like(xs)
+    top = 0.0
+    for name, w in use:
+        pts = _curve_points(curves, name)
+        total += w * np.interp(xs, [p[0] for p in pts], [p[1] for p in pts])
+        top = max(top, max(p[1] for p in pts))
+    avg = float(np.mean(total))
+    unit = str(curves.get("unit") or "").lower()
+    if "percent" in unit or "%" in unit or top > 1.5:
+        avg /= 100.0
+    peak = None
+    if "relative" in unit or "of the" in unit:
+        peak = _f(sp.camera_value(cam, "qe_peak")[0]) if cam else None
+        if peak is None:
+            peak = _f(((spec or {}).get("points") or {}).get("qe_peak"))
+        if peak is None or not 0 < peak <= 1:
+            return None
+        avg *= peak
+    if not 0 < avg <= 1:
+        return None
+    words = (label + (f" × peak QE {peak:g}" if peak is not None else "")
+             + f", averaged over {lo:.0f}–{hi:.0f} nm ({cat} band"
+             + (f", the part of {rng[0]:.0f}–{rng[1]:.0f} nm the curve covers" if (lo, hi) != rng else "") + ")")
+    return {"value": round(avg, 3), "color": use[0][0] if len(use) == 1 else "RGGB", "range_nm": (lo, hi),
+            "peak": peak, "words": words}
+
+
+def camera_spec(cam: dict | None) -> dict | None:
+    """The maker's spec for a camera profile's camera (the user's specs folder first, then the built-in ones)."""
+    inst = ((cam or {}).get("camera") or {}).get("instrume")
+    return sp.find_spec(inst, (BUILTIN_SPECS,)) if inst else None
+
+
+def optics_values(doc: dict, cam: dict | None, overrides: dict | None = None, spec=_FIND,
+                  bands: list | None = None) -> dict:
+    """Each budget input: {key: {"value", "how" ("profile" / "user" / "assumed" / "maker's QE curve" …), "words"}}.
+    The camera QE in the band, when not typed, is worked out per band from the maker's QE curve (band_qe): its
+    entry then has "by_band" {band: value} and "curve" {band: band_qe(...)}, and "value" is the first band's.
+    spec: the camera's spec (found from the camera profile when not given); bands: the bands to work it out for (the
+    system profile's, else the camera's one-shot colors, else V)."""
     tel = dict(doc.get("telescope") or {})
     overrides = {k: v for k, v in (overrides or {}).items() if v is not None}
     tel.update(overrides)
@@ -168,10 +281,21 @@ def optics_values(doc: dict, cam: dict | None, overrides: dict | None = None) ->
                         "why": "the Bayer filter is part of the camera's QE"}
             continue
         if key == "qe_in_band":
+            sp_doc = camera_spec(cam) if spec is _FIND else spec
+            want = list(bands or (doc.get("bands") or {}).keys()) or (["TG", "TR", "TB"] if osc else ["V"])
+            curve = {b: q for b in want for q in (band_qe(sp_doc, b, cam),) if q}
+            if curve:
+                first = next(b for b in want if b in curve)
+                out[key] = {"value": curve[first]["value"], "how": CURVE_HOW, "words": words,
+                            "by_band": {b: q["value"] for b, q in curve.items()}, "curve": curve,
+                            "why": "; ".join(f"{onsky.BAND_WORDS.get(b, b)} {q['value']:.3g}"
+                                             for b, q in curve.items()) + " (averaged over each band)"}
+                continue
             qe, rec = sp.camera_value(cam, "qe_peak")
             if _f(qe) is not None:
-                out[key] = {"value": float(qe), "how": f"camera {source_words(rec)}", "words": words,
-                            "why": "peak QE; the average over the band is lower"}
+                out[key] = {"value": float(qe), "how": "assumed", "words": words,
+                            "why": f"the camera's peak QE ({source_words(rec)}); no maker's QE curve on file, and "
+                                   "the average over a band is lower"}
                 continue
             default, why = 0.6, "not known: a typical back-illuminated sensor averaged over a band"
         out[key] = {"value": default, "how": "assumed", "words": words, "why": why}
@@ -199,16 +323,26 @@ def budget(band: str, zp1, k, aperture_mm, optics: dict) -> dict | None:
     zp0 = zp1 + k
     eff = 10 ** (-0.4 * (ideal - zp0))
     o = {key: optics[key]["value"] for key in optics}
-    parts = [("Clear aperture (1 − obstruction²)", 1.0 - o["central_obstruction_fraction"] ** 2),
-             (f"Mirrors ({int(o['mirrors'])} × {o['mirror_reflectivity']:.2f})",
-              o["mirror_reflectivity"] ** int(round(o["mirrors"]))),
-             ("Corrector / reducer", o["corrector_transmission"]),
-             ("Filter", o["filter_transmission"]),
-             ("Camera QE", o["qe_in_band"])]
+    qe = optics["qe_in_band"]
+    qe_v = (qe.get("by_band") or {}).get(band, o["qe_in_band"])
+    if qe["how"] == CURVE_HOW and band in (qe.get("curve") or {}):
+        qe_note = "maker's QE curve: " + qe["curve"][band]["words"]
+    else:
+        qe_note = COAT_WORDS.get(qe["how"], qe["how"])
+    ob = optics["central_obstruction_fraction"]
+    n_m = int(round(o["mirrors"]))
+    parts = [("Clear aperture (1 − obstruction²)", 1.0 - o["central_obstruction_fraction"] ** 2,
+              f"obstruction {num(ob['value'])}" + (" (assumed)" if ob["how"] == "assumed" else "")),
+             (f"Mirrors ({n_m} × {o['mirror_reflectivity']:.2f})" if n_m else "Mirrors (none)",
+              o["mirror_reflectivity"] ** n_m, "" if n_m else NO_MIRRORS),
+             ("Corrector / reducer", o["corrector_transmission"], ""),
+             ("Filter", o["filter_transmission"], ""),
+             ("Camera QE", qe_v, qe_note)]
     if band in BAYER_SHARE:
-        parts.append((f"Pixels of this color (one-shot color: {BAYER_SHARE[band]:.0%} of them)", BAYER_SHARE[band]))
+        parts.append((f"Pixels of this color (one-shot color: {BAYER_SHARE[band]:.0%} of them)", BAYER_SHARE[band],
+                      ""))
     pred = 1.0
-    for _n, v in parts:
+    for _n, v, _w in parts:
         pred *= v
     pred_zp1 = ideal + 2.5 * math.log10(pred) - k if pred > 0 else None
     return {"band": band, "catalog_band": cat, "system": BAND_SYSTEM.get(cat, ""), "photons_mag0": n0,
@@ -290,7 +424,7 @@ def gather(system_path: str, prefs: dict | None = None, event: str = "", optics_
         pts = [p for p in pts_all if p.get("channel") == b]
         bands.append({"band": b, "words": onsky.BAND_WORDS.get(b, b), "rows": rows, "points": pts, "recs": recs})
 
-    optics = optics_values(doc, cam, optics_override)
+    optics = optics_values(doc, cam, optics_override, spec=spec, bands=[b["band"] for b in bands])
     budgets = []
     for bd in bands:
         zp = bd["recs"].get("zero_point")
@@ -517,7 +651,16 @@ def _band_table_rows(bd):
     return [[r["words"], r["value"], r["source"], r["conditions"]] for r in bd["rows"]]
 
 
-PATH_RE = re.compile(r"(?:[A-Za-z]:[\\/]|\\\\|/home/|/Users/|/mnt/|~[\\/])\S*")
+# A file location: a root (C:\ · \\\\server · /home/ · /Users/ · ~/ …), then folders whose names may hold spaces
+# ("Panel 1-1"), then a last name that may hold spaces before a part starting with a digit or a capital
+# ("…\\Raw\\Panel 1-1", "…\\M045 Pleiades"), or a file name with spaces up to its extension ("Andor spec sheet.pdf");
+# otherwise it ends at a space before a lower-case word, or at ; , ( ) ' or ". When unsure it takes too much, never
+# too little.
+_SEG = r"[^\\/:*?\"<>|;\r\n]"
+_LAST = r"[^\s\\/:*?\"<>|;,()']"
+PATH_RE = re.compile(r"(?:[A-Za-z]:[\\/]|\\\\|/home/|/Users/|/mnt/|/media/|/Volumes/|/tmp/|~[\\/])"
+                     rf"(?:{_SEG}+[\\/])*(?:(?:{_LAST}+ ){{1,5}}{_LAST}*\.[A-Za-z0-9]{{1,5}}(?![A-Za-z0-9])"
+                     rf"|{_LAST}+(?: (?=[0-9A-Z]){_LAST}+)*)?")
 
 
 def scrub(text: str) -> str:
@@ -565,9 +708,61 @@ def write_pdf(info: dict, path: str, share: bool = False, version: str = "") -> 
     return pages[0]
 
 
+def pdf_date(when: datetime) -> str:
+    """A PDF date string. An aware time in UTC → 'D:20261102143000Z'; any other aware time with its own offset at
+    that moment ('D:20261102093000-05'00''); a naive time is taken as local and given the offset it had then (after
+    DST ends that is −05'00', not the −04'00' matplotlib's own writer took from time.altzone)."""
+    if when.tzinfo is None:
+        when = when.astimezone()
+    off = when.utcoffset()
+    r = when.strftime("D:%Y%m%d%H%M%S")
+    mins = int(round(off.total_seconds() / 60.0))
+    if mins == 0:
+        return r + "Z"
+    sign = "+" if mins > 0 else "-"
+    mins = abs(mins)
+    return r + f"{sign}{mins // 60:02d}'{mins % 60:02d}'"
+
+
+class _PdfDate(datetime):
+    """A datetime that writes itself into the PDF with pdf_date (matplotlib checks the metadata is a datetime, then
+    uses an object's own pdfRepr when it has one)."""
+
+    def pdfRepr(self):
+        from matplotlib.backends.backend_pdf import pdfRepr
+        return pdfRepr(pdf_date(self))
+
+
+def pdf_metadata(info: dict, share: bool, version: str, now: datetime | None = None) -> dict:
+    """The PDF's document properties. A shared copy's dates are in UTC ('Z': nothing about where it was made); a full
+    copy's carry the computer's real UTC offset at that moment."""
+    now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.astimezone()
+    when = now.astimezone(timezone.utc) if share else now.astimezone()
+    d = _PdfDate(when.year, when.month, when.day, when.hour, when.minute, when.second, tzinfo=when.tzinfo)
+    return {"Title": report_title(info, share), "Creator": f"SHOBS-FLUX {version}", "CreationDate": d, "ModDate": d}
+
+
+def date_span(a: str, b: str) -> str:
+    """'2026-09-01' when both ends are the same day, else '2026-09-01 to 2026-10-07'."""
+    return a if a == b else f"{a} to {b}"
+
+
+def optics_value_words(key: str, v: dict) -> str:
+    """A budget input's value as the report prints it: '0.4 (assumed)', '0 mirrors (refractor or lens: …)',
+    '0.83 (green (TG)) · 0.42 (red (TR))' for a QE worked out per band."""
+    if key == "mirrors" and int(round(v["value"])) == 0:
+        return NO_MIRRORS
+    if key == "qe_in_band" and v.get("by_band") and len(v["by_band"]) > 1:
+        return " · ".join(f"{num(q, 3)} {onsky.BAND_WORDS.get(b, b)}" for b, q in v["by_band"].items())
+    txt = f"{int(round(v['value']))}" if key == "mirrors" else num(v["value"])
+    return txt + (" (assumed)" if v["how"] == "assumed" else "")
+
+
 def _write(info, tmp, share, version, pages, new_page, table, tel, cam, mode, trend_plots, PdfPages):
     """The pages themselves (write_pdf handles the file)."""
-    with PdfPages(tmp, metadata={"Title": report_title(info, share), "Creator": f"SHOBS-FLUX {version}"}) as pdf:
+    with PdfPages(tmp, metadata=pdf_metadata(info, share, version)) as pdf:
         # 1 summary
         p = new_page(pdf, "System report")
         p.para(system_words(info), size=13, color=ACCENT)
@@ -579,11 +774,14 @@ def _write(info, tmp, share, version, pages, new_page, table, tel, cam, mode, tr
                    "computer are left out.", color=HINT)
         p.heading("The setup")
         ap, fl = _f(tel.get("aperture_mm")), _f(tel.get("focal_mm"))
+        ob = info["optics"]["central_obstruction_fraction"]
+        nm = info["optics"]["mirrors"]
         rows = [["Telescope", tel.get("name") or "—"],
                 ["Aperture", fmt(ap, "mm")],
                 ["Focal length", fmt(fl, "mm") + (f"  (f/{fl / ap:.2f})" if ap and fl else "")],
-                ["Central obstruction", f"{_f(tel.get('central_obstruction_fraction')) * 100:.0f} % of the diameter"
-                 if _f(tel.get("central_obstruction_fraction")) is not None else "not known"]]
+                ["Central obstruction", f"{num(ob['value'])} of the diameter"
+                 + (" (assumed)" if ob["how"] == "assumed" else f" ({ob['value'] * 100:.0f} %)")],
+                ["Mirrors", optics_value_words("mirrors", nm)]]
         if tel.get("mount"):
             rows.append(["Mount and optics", tel["mount"]])
         rows += [["Camera", cam.get("instrume") or info["camera_id"]],
@@ -604,15 +802,14 @@ def _write(info, tmp, share, version, pages, new_page, table, tel, cam, mode, tr
             rows.append(["Site", ", ".join(x for x in (
                 f"latitude {site['lat']:.4f}°" if "lat" in site else "",
                 f"longitude {site['lon']:.4f}°" if "lon" in site else "",
-                f"elevation {site['elevation_m']:g} m" if "elevation_m" in site else "") if x)
+                f"elevation {num(site['elevation_m'])} m" if "elevation_m" in site else "") if x)
                 or "not set on the Sky page"])
         dr = info["date_range"]
         n_n = len({d for d, _t in info["nights"]})
-        rows.append(["On-sky data", f"{n_n} night{'s' if n_n != 1 else ''}, {dr[0]} to {dr[1]}" if dr else
+        rows.append(["On-sky data", f"{n_n} night{'s' if n_n != 1 else ''}, {date_span(*dr)}" if dr else
                      "none in the run history yet"])
         if info["camera_dates"]:
-            cd = info["camera_dates"]
-            rows.append(["Camera values dated", cd[0] if cd[0] == cd[1] else f"{cd[0]} to {cd[1]}"])
+            rows.append(["Camera values dated", date_span(*info["camera_dates"])])
         p = table(pdf, p, "System report", ["", ""], rows, [1.9, PAGE_W - 2 * MARGIN - 1.9])
         p.heading("Key numbers")
         key_rows = []
@@ -640,11 +837,11 @@ def _write(info, tmp, share, version, pages, new_page, table, tel, cam, mode, tr
             other = list(r["earlier"])
             if _f(r["spec"]) is not None:
                 g = _f(mode.get("gain_setting"))
-                other.insert(0, f"spec {r['spec']:.4g}" + (f" at gain {g:g}" if g is not None else ""))
+                other.insert(0, f"spec {num(r['spec'])}" + (f" at gain {g:g}" if g is not None else ""))
             rows.append([r["words"], r["value"], r["source"], "; ".join(other) or "—",
                          r["conditions"] + (f" ({r['note']})" if r["note"] else "")])
         p = table(pdf, p, "Camera", ["Value", "Now", "Source", "Other values", "Conditions"], rows,
-                  [1.2, 1.55, 1.0, 1.8, 1.75])
+                  [1.2, 1.45, 1.2, 1.7, 1.75])
         if info["per_channel"]:
             p.heading("Per color")
             keys = [k for k, _w in CAMERA_ROWS if any(k in v for v in info["per_channel"].values())]
@@ -696,22 +893,29 @@ def _write(info, tmp, share, version, pages, new_page, table, tel, cam, mode, tr
         rows = []
         for key, v in info["optics"].items():
             how = COAT_WORDS.get(v["how"], v["how"])
-            rows.append([v["words"], f"{v['value']:g}", how + (f": {v['why']}" if v.get("why") and v["how"] != "profile"
-                                                              else "")])
-        p = table(pdf, p, "Throughput", ["Budget input", "Value", "From"], rows, [2.8, 0.9, PAGE_W - 2 * MARGIN - 3.7])
+            if key == "mirrors" and int(round(v["value"])) == 0:
+                why = ""
+            elif v["how"] == CURVE_HOW:
+                why = ": " + "; ".join(f"{onsky.BAND_WORDS.get(b, b)}: {q['words']}" for b, q in v["curve"].items())
+            else:
+                why = f": {v['why']}" if v.get("why") and v["how"] not in ("profile", "user") else ""
+            rows.append([v["words"], optics_value_words(key, v), how + why])
+        p = table(pdf, p, "Throughput", ["Budget input", "Value", "From"], rows, [2.5, 1.5, PAGE_W - 2 * MARGIN - 4.0])
         if not info["budgets"]:
             p.para("No band has both a zero point and an aperture yet, so there is no budget to compare.")
         for bg in info["budgets"]:
-            rows = [["Photons from a magnitude-0 star", f"{bg['photons_mag0']:.3g} /s/m²",
+            n0 = bg["photons_mag0"]
+            n0 = round(n0, -max(0, len(str(int(n0))) - 3))         # 3 figures: 8,860,000,000
+            rows = [["Photons from a magnitude-0 star", f"{num(n0)} /s/m²",
                      f"catalog band {bg['catalog_band']}, {bg['system']}"],
-                    ["Full aperture area", f"{bg['area_m2']:.4g} m²", f"{_f(tel.get('aperture_mm')):g} mm"],
+                    ["Full aperture area", f"{bg['area_m2']:.4g} m²", fmt(tel.get("aperture_mm"), "mm")],
                     ["Ideal zero point (above the atmosphere)", f"{bg['ideal_zp']:.3f}", "every photon counted"],
                     ["Measured zero point at airmass 1", f"{bg['measured_zp1']:.3f}", "system profile"],
                     ["Extinction used", f"{bg['k']:.3f} mag/airmass",
                      "measured" if bg["k_measured"] else "typical for the band (not measured)"],
                     ["Measured zero point above the atmosphere", f"{bg['measured_zp0']:.3f}", "ZP + k"]]
-            for name, v in bg["parts"]:
-                rows.append([f"Budget: {name}", f"{v:.3f}", ""])
+            for name, v, note in bg["parts"]:
+                rows.append([f"Budget: {name}", f"{v:.3f}", note])
             rows += [["Budget throughput", f"{bg['predicted_eff'] * 100:.1f} %",
                       f"predicts a zero point of {bg['predicted_zp1']:.3f} at airmass 1" if bg["predicted_zp1"]
                       else ""],
@@ -802,6 +1006,11 @@ def _write(info, tmp, share, version, pages, new_page, table, tel, cam, mode, tr
             "Photon budget: the photons a magnitude-0 star sends through the band (Vega for Johnson–Cousins, AB for "
             "Sloan), on the full aperture, times each part's throughput; the measured zero point is moved above the "
             "atmosphere with the extinction before comparing.",
+            "Camera QE in the band, unless typed in: the maker's QE curve from the camera's spec (relative curves "
+            "times the peak QE), averaged over the band as a top-hat: the catalog band's centre ± half its width "
+            "(V 500–590 nm, B 389–487 nm, R 572–710 nm; Sloan bands likewise). A one-shot-color band (TG, TR, TB) "
+            "uses its own color's curve, a filter band on a one-shot-color camera the RGGB mix. With no curve on "
+            "file the peak QE (or 0.6) is used and marked assumed.",
         ])
         p.heading("Caveats")
         p.bullets(info["caveats"] or ["None found in the data."])

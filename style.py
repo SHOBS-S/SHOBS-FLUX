@@ -49,6 +49,9 @@ BAD = "#b00020"           # ✖
 WARN_FG = "#8a5a00"       # ⚠ (dark amber text on pale yellow: yellow text on white is unreadable)
 WARN_BG = "#fff3c4"
 OK = "#1f5f99"            # ✔ normal: blue text on white
+# the busy bar's fill (House Style for every SHOBS app, John 1 Nov 2026): SHOBS-P's green, as SHOBS-SCHED 1.3.0;
+# it stands out on the navy status strip and on a white dialog alike. Never a blue (OK) on the navy strip.
+BUSY_GREEN = "#4caf50"
 ICON = {"bad": "✖", "warn": "⚠", "ok": "✔"}
 
 # ---- drawing (block bar, weather strip) ------------------------------------------------------------------------------
@@ -190,10 +193,13 @@ def setup(root) -> ttk.Style:
     st.configure("TNotebook", background=CARD, bordercolor=LINE)
     st.configure("TNotebook.Tab", padding=(s(12), s(5)), font=font(10))
     st.map("TNotebook.Tab", background=[("selected", CARD)], foreground=[("selected", SIDE)])
-    st.configure("Card.Horizontal.TProgressbar", background=OK, troughcolor="#e6edf2", bordercolor=LINE)
-    # the busy bar on the dark status strip
-    st.configure("Status.Horizontal.TProgressbar", background=OK, troughcolor=mix(STATUS_BG, "#ffffff", 0.18),
-                 bordercolor=STATUS_BG, lightcolor=OK, darkcolor=OK)
+    # the busy bars (BUSY_GREEN everywhere one is drawn): a dialog's on the white card, the window's on the navy strip
+    st.configure("Horizontal.TProgressbar", background=BUSY_GREEN, lightcolor=BUSY_GREEN, darkcolor=BUSY_GREEN)
+    st.configure("Card.Horizontal.TProgressbar", background=BUSY_GREEN, troughcolor="#e6edf2", bordercolor=LINE,
+                 lightcolor=BUSY_GREEN, darkcolor=BUSY_GREEN)
+    st.configure("Status.Horizontal.TProgressbar", background=BUSY_GREEN,
+                 troughcolor=mix(STATUS_BG, "#ffffff", 0.18), bordercolor=STATUS_BG, lightcolor=BUSY_GREEN,
+                 darkcolor=BUSY_GREEN)
     # tables: rows tall enough for the font at any scaling (never clipped on high-DPI Windows)
     body = tkfont.Font(root, font=font(10))
     st.configure("Treeview", rowheight=int(body.metrics("linespace") * 1.55) + 2, font=font(10),
@@ -258,6 +264,9 @@ def badge_image(root, mode: str, size: int | None = None) -> tk.PhotoImage:
 # Multi-step jobs keep the same bar and change the words step by step; when the count is known the words carry it
 # ("Finding suggested transits… 12 of 40"): it is never a filling bar. When the last job ends the bar goes away; the
 # ✔ / ⚠ / ✖ result is shown where the job was started. The same class is meant to be copied into SHOBS-P unchanged.
+
+BUSY_BAR_STYLES = ("Horizontal.TProgressbar", "Card.Horizontal.TProgressbar", "Status.Horizontal.TProgressbar")
+
 
 class BusyBar(ttk.Frame):
     """The window's (or dialog's) busy bar. begin(words) → token; words(token, text) changes them; end(token) ends

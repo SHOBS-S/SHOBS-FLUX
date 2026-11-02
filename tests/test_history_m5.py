@@ -214,7 +214,8 @@ class TestReport(TempData):
         o = report.optics_values({"telescope": {}}, cam)
         self.assertEqual(o["central_obstruction_fraction"]["how"], "assumed")
         self.assertEqual(o["filter_transmission"]["value"], 1.0)           # one-shot color: the Bayer dye is in QE
-        self.assertEqual(o["qe_in_band"]["value"], 0.8)
+        self.assertEqual(o["qe_in_band"]["how"], "maker's QE curve")      # 0.5.1: was the 0.8 peak QE
+        self.assertLess(o["qe_in_band"]["value"], 0.8)
         mono = report.optics_values({"telescope": {"mirrors": 3}}, None, {"mirror_reflectivity": 0.96})
         self.assertEqual(mono["filter_transmission"]["value"], 0.90)
         self.assertEqual(mono["mirrors"]["how"], "profile")

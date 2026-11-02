@@ -65,6 +65,7 @@ def camera_in_use(setup: dict, file_max_adu: float = 65535.0, temp_c=None,
     prof = sp.find_camera_profile(cam.cam_id)
     if prof:
         cam.profile_path = sp.profile_path("cameras", cam.cam_id)
+        sp.rederive(prof)                  # a worked-out value saved stale by 0.5.0 is used as it should be now
     spec = sp.find_spec(setup.get("instrume"), (BUILTIN_SPECS,))
     if spec:
         cam.spec_model = spec.get("model")
@@ -119,7 +120,9 @@ def camera_in_use(setup: dict, file_max_adu: float = 65535.0, temp_c=None,
         if v is not None:
             rec = sp.record(v, "e-", "spec", note=f"{spec.get('model')} at gain {g_set:g}")
     if rec is None:
-        rec = sp.record(round(sat * gain), "e-", "derived", note="saturation × gain")
+        b = sp.value_of((prof or {}).get("values", {}).get("bias_level_adu")) if prof else None
+        rec = sp.record(round((sat - (b or 0.0)) * gain), "e-", "derived",
+                        note="(saturation − bias) × gain" if b is not None else "saturation × gain")
     _set(cam, "full_well_e", rec)
 
     # linear limit

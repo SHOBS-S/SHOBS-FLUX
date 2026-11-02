@@ -13,6 +13,56 @@ import re
 import shobs_profile as sp
 
 
+# Plain names for the values in a profile (the Roll back window; the Profiles page can use the same map).
+VALUE_NAMES = {
+    "gain_e_per_adu": "Gain", "read_noise_e": "Read noise", "full_well_e": "Full well", "saturation_adu": "Saturation",
+    "linear_limit_adu": "Linear limit", "bias_level_adu": "Bias level", "dark_current_e_per_px_s": "Dark current",
+    "qe_peak": "Peak QE", "exposure_offset_s": "Exposure-timing offset", "hot_pixel_ppm": "Hot pixels",
+    "hot_pixel_rate_e_per_s": "Hot-pixel rate", "glow_e_per_px_s": "Edge glow",
+    "zero_point": "Zero point at airmass 1", "zero_point_at_x": "Zero point at the night's airmass",
+    "extinction_k": "Extinction k", "fwhm_in_focus": "Seeing in focus (FWHM)",
+    "fwhm_imaging": "Seeing, imaging focus", "fwhm_defocus": "Star size defocused (FWHM)",
+    "sky_brightness": "Sky brightness", "scintillation_cy": "Scintillation C_Y",
+    "overhead_s": "Time lost between frames", "interval_s": "Time between frame starts",
+    "raw_arcsec_per_px": "Plate scale",
+    # the telescope's plain fields in a system profile
+    "name": "Telescope name", "aperture_mm": "Aperture", "focal_mm": "Focal length",
+    "focal_header": "Focal length in the header", "telescop_header": "TELESCOP in the header",
+    "telescop_header_ignored": "TELESCOP not used", "central_obstruction_fraction": "Central obstruction",
+    "mount": "Mount and optics", "mirrors": "Mirrors", "mirror_reflectivity": "Mirror reflectivity",
+    "corrector_transmission": "Corrector transmission", "filter_transmission": "Filter transmission",
+    "qe_in_band": "Camera QE in the band",
+}
+def value_name(path) -> str:
+    """'values.gain_e_per_adu' → 'Gain'; 'per_channel.G.read_noise_e' → 'Read noise (G)';
+    'bands.TG.zero_point' → 'Zero point at airmass 1 (green (TG))'; 'bands.TG.fwhm_defocus.+125 steps' →
+    'Star size defocused (FWHM) (green (TG), +125 steps)'. An unknown key is shown as it is."""
+    import onsky
+    parts = [str(x) for x in (path.split(".") if isinstance(path, str) else path)]
+    if not parts:
+        return ""
+    if parts[0] == "bands" and len(parts) >= 3:
+        extra = [onsky.BAND_WORDS.get(parts[1], parts[1])] + parts[3:]
+        return f"{VALUE_NAMES.get(parts[2], parts[2])} ({', '.join(extra)})"
+    if parts[0] == "per_channel" and len(parts) >= 3:
+        return f"{VALUE_NAMES.get(parts[2], parts[2])} ({parts[1]})"
+    name = VALUE_NAMES.get(parts[-1], parts[-1])
+    rest = parts[1:-1]
+    return name + (f" ({', '.join(rest)})" if rest else "")
+
+
+def number_words(v) -> str:
+    """65535 → '65,535'; 1.89 → '1.89'; 0.0004242 → '0.0004242' (a plain number, never in e-notation)."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return str(v)
+    if abs(v) >= 1000:
+        return f"{v:,.0f}" if abs(v - round(v)) < 0.05 or abs(v) >= 1e5 else f"{v:,.1f}"
+    txt = f"{v:.4g}"
+    if "e" in txt:
+        txt = f"{v:.8f}".rstrip("0").rstrip(".")
+    return txt
+
+
 class RollbackError(Exception):
     """A revision that cannot be put back (the message is a plain sentence)."""
 
@@ -41,6 +91,7 @@ def revisions(path: str) -> list[dict]:
             item.update(error=str(exc), doc=None, changes=[], updated="", written_by="")
             out.append(item)
             continue
+        sp.rederive(doc)                 # as it would be put back: a worked-out value follows its inputs (0.5.1)
         item.update(doc=doc, updated=str(doc.get("updated") or "")[:16].replace("T", " "),
                     written_by=doc.get("written_by") or "",
                     changes=differences(doc, now) if now else [])
@@ -57,15 +108,16 @@ def _fmt(rec) -> str:
     v = rec.get("value")
     if v is None or rec.get("source") == "none":
         return "—"
-    txt = f"{v:g}" if isinstance(v, (int, float)) else str(v)
+    txt = number_words(v) if isinstance(v, (int, float)) else str(v)
     if isinstance(rec.get("sigma"), (int, float)):
-        txt += f" ± {rec['sigma']:g}"
+        txt += f" ± {number_words(rec['sigma'])}"
     return f"{txt} {rec.get('unit') or ''}".strip() + f" ({sp.SOURCE_WORDS.get(rec.get('source'), rec.get('source'))})"
 
 
 def differences(old: dict, new: dict) -> list[tuple[str, str, str]]:
-    """The value records that differ between two revisions: [(name, old words, new words)]. Only the number, its
-    ± and its source count (a later date on the same value is not a change)."""
+    """The value records that differ between two revisions: [(key path, old words, new words)], e.g.
+    ('values.gain_e_per_adu', '1 e-/ADU (estimate)', '1.904 e-/ADU (typed by you)'); value_name(key) gives the plain
+    name. Only the number, its ± and its source count (a later date on the same value is not a change)."""
     a = {".".join(str(p) for p in path): rec for path, rec in sp.iter_records(old)}
     b = {".".join(str(p) for p in path): rec for path, rec in sp.iter_records(new)}
     out = []
@@ -83,8 +135,8 @@ def differences(old: dict, new: dict) -> list[tuple[str, str, str]]:
         if isinstance(ta, dict) and isinstance(tb, dict):
             for k in list(ta) + [k for k in tb if k not in ta]:
                 if ta.get(k) != tb.get(k) and not isinstance(ta.get(k), dict):
-                    out.append((f"{part}.{k}", "—" if ta.get(k) is None else str(ta.get(k)),
-                                "—" if tb.get(k) is None else str(tb.get(k))))
+                    out.append((f"{part}.{k}", "—" if ta.get(k) is None else number_words(ta.get(k)),
+                                "—" if tb.get(k) is None else number_words(tb.get(k))))
     return out
 
 

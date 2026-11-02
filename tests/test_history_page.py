@@ -132,7 +132,8 @@ class TestHistoryWindow(TempData):
         app.update()
         dlg = pp.roll_dialog
         self.assertEqual([r["revision"] for r in dlg.revs], [1])
-        self.assertIn("gain_e_per_adu", dlg.text.get("1.0", "end"))
+        self.assertIn("Gain:", dlg.text.get("1.0", "end"))           # 0.5.1: plain names, not values.gain_e_per_adu
+        self.assertNotIn("gain_e_per_adu", dlg.text.get("1.0", "end"))
         dlg.put_back()
         app.update()
         self.assertIn("Revision 1 put back as revision 3", pp.msg_var.get())
