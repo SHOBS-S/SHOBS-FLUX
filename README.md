@@ -74,6 +74,23 @@ own system's numbers instead of guesses.
   before / after split, and the methods and caveats. A **shared copy** leaves out the site (latitude, longitude,
   elevation) and the file locations on your computer.
 
+## New in 0.5.1
+
+- Sky page: after Run the plots follow the new run; the folder line names the plate solution ("11 of 12
+  plate-solved (TAN-SIP)"); a folder run can be marked **Imaging (astrophotography)**, and its star size is kept
+  apart as "Seeing, imaging focus" (never mixed with photometry seeing); several runs of the same night count as one
+  night; a folder run is recorded in the history only when you **Save** it (Run is a look). A one-time clean-up takes
+  folder runs that 0.5.0 recorded but were never saved off the History page (nothing is deleted).
+- History: older runs are judged again by today's rules (a +125-step defocused night is no longer "seeing in
+  focus"); dark runs record read noise; old check runs say why; axis labels name the value and unit; nights with no
+  focal length in their headers join their camera's setup.
+- System report: camera QE in the band worked out from the maker's QE curve when the box is left blank; big numbers
+  with separators (15,800); "(assumed)" shown wherever an assumed value is used; 0 mirrors explained; shared copies
+  scrub whole file paths (spaces too) and date the PDF in UTC.
+- Profiles: Roll back uses plain names and says which revision is in use; worked-out values (full well) are worked
+  out again when their inputs change.
+- The busy bar is green on the navy status strip, as in SHOBS-P and SHOBS-SCHED.
+
 ## New in 0.5
 
 - The History page: trend plots of any value per setup and date range, with an event date for before / after; PNG

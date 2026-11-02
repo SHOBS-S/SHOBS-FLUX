@@ -1033,6 +1033,10 @@ def run_values(res: DarkResult, profile_id: str) -> list:
         add("dark_current_e_per_px_s", tr.rate, "e-/px/s", None if tr.upper_limit else tr.sigma, tag)
         add("hot_pixel_ppm", tr.hot_ppm, "ppm", None, tag)
         add("glow_e_per_px_s", tr.glow_e_s, "e-/px/s", None, tag)
+    # the read noise the noise line measured (a check on the bench run's), so the History page trends it too
+    if res.read_noise_e is not None and math.isfinite(res.read_noise_e):
+        rows.append({"key": "read_noise_e", "value": float(res.read_noise_e), "sigma": None, "unit": "e-",
+                     "source": "darks", "channel": None, "profile_id": profile_id, "date": res.date})
     return rows
 
 
