@@ -98,10 +98,16 @@ def runs_for(setup: dict, removed: bool = False) -> list[dict]:
     """The runs of one setup, newest first (system: its on-sky nights and saves; camera: its checks, bench and dark
     runs)."""
     out = []
+    cache: dict = {}
     for r in history.recent_runs(2000, removed=removed):
         if setup["kind"] == "system":
-            if r["kind"] in ("onsky", "sky") and history.same_system(r.get("system_id"), setup["id"]):
-                out.append(r)
+            if r["kind"] in ("onsky", "sky"):
+                if history.same_system(r.get("system_id"), setup["id"]):
+                    out.append(r)
+                else:
+                    why = history.joins_setup(r.get("system_id"), setup["id"], cache)
+                    if why:
+                        out.append(dict(r, joined=why))
         elif r["kind"] in ("check", "bench", "darks") and r.get("camera_id") == setup["id"]:
             out.append(r)
     return out
@@ -213,6 +219,58 @@ class HistoryPage:
         return self.setups[i] if 0 <= i < len(self.setups) else None
 
     def refresh(self):
+        self._show()
+        self.rejudge_older()
+
+    def rejudge_older(self) -> bool:
+        """Runs logged by an older FLUX are judged again by today's rules (history.rejudge), on the busy bar, the
+        first time the page opens after an update (and whenever a run with older rules turns up). True when started."""
+        if getattr(self, "_rejudging", False):
+            return False
+        try:
+            stale = history.stale_runs()
+        except Exception:
+            stale = []
+        if not stale:
+            return False
+        self._rejudging = True
+        n = len(stale)
+
+        def work(step):
+            step(f"Judging {n} older run{'s' if n != 1 else ''} by today's rules")
+            return history.rejudge(step)
+
+        def done(got, exc):
+            self._rejudging = False
+            if exc is not None:
+                settings.log(f"re-judging older runs failed: {exc!r}")
+                return
+            settings.log(f"older runs judged again by the {history.RULES_VERSION} rules: {got}")
+            try:
+                if not self.frame.winfo_exists():
+                    return
+            except tk.TclError:
+                return
+            self._show()
+            bits = []
+            if got.get("onsky"):
+                bits.append(f"{got['onsky']} night{'s' if got['onsky'] != 1 else ''}")
+            if got.get("check") or got.get("darks"):
+                m = got.get("check", 0) + got.get("darks", 0)
+                bits.append(f"{m} camera run{'s' if m != 1 else ''}")
+            if bits:
+                text = (f"✔ {' and '.join(bits)} logged by an older FLUX judged again by today's rules (the old "
+                        "values are kept in each run).")
+                if got.get("kept"):
+                    text += (f" ⚠ {got['kept']} night{'s' if got['kept'] != 1 else ''} kept as judged then: "
+                             "the on-sky log is gone.")
+                if not self.msg_var.get():
+                    self.say(text)
+                self.app.set_status(text)
+        self.app.jobs.run(work, done, "Judging older runs by today's rules")
+        return True
+
+    def _show(self):
         old = self.setup()
         self.setups = history.setups()
         self.setup_box.configure(values=[s["words"] for s in self.setups])
@@ -314,24 +372,40 @@ class HistoryPage:
             self.canvas.draw_idle()
             return
         key, channel, words, _n = ser
-        self.points = history.series_points(st["kind"], st["id"], key, channel, d_from, d_to)
-        unit = self.points[0]["unit"] if self.points else ""
+        pts = history.series_points(st["kind"], st["id"], key, channel, d_from, d_to)
+        self.points, unit, unit_note = history.unify_units(pts)
+        notes = [unit_note] if unit_note else []
+        old = sorted({p["judged_by"] for p in self.points if p.get("judged_by")})
+        if old:
+            n = sum(1 for p in self.points if p.get("judged_by"))
+            notes.append(f"⚠ {n} point{'s' if n != 1 else ''} (ringed) judged by FLUX {', '.join(old)}: "
+                         f"{'their' if n != 1 else 'its'} on-sky log is gone, so today's rules cannot read "
+                         f"{'them' if n != 1 else 'it'} again.")
+        joined = [p for p in self.points if p.get("joined")]
+        if joined:
+            notes.append(f"{len(joined)} night{'s' if len(joined) != 1 else ''} with no focal length in the headers "
+                         "joined to this setup (the only one for this camera).")
         now = now_record(st, key, channel)
         spec = spec_value(st, key)
         self._figure()
         import trend_plots
         trend_plots.draw_trend(self.fig, self.points, words, unit, now=now, spec=spec, event=event or None)
         self.canvas.draw_idle()
+        uw = history.unit_words(unit)
         if event:
             ba = trend_plots.before_after(self.points, event)
             if ba:
                 e = ba["change_err"]
                 tp = trend_plots
-                self.say(f"Before {event}: {tp.num(ba['before']['mean'])} ({ba['before']['n']}); from it on: "
-                         f"{tp.num(ba['after']['mean'])} ({ba['after']['n']}); change {tp.num(ba['change'], True)}"
-                         + (f" ± {tp.num(e)}" if e == e else "") + f" {unit}.")
+                notes.insert(0, f"Before {event}: {tp.num(ba['before']['mean'])} ({ba['before']['n']}); from it on: "
+                             f"{tp.num(ba['after']['mean'])} ({ba['after']['n']}); change "
+                             f"{tp.num(ba['change'], True)}" + (f" ± {tp.num(e)}" if e == e else "")
+                             + (f" {uw}" if uw else "") + ".")
             else:
-                self.say(f"⚠ No point on one side of {event} in these dates, so there is no before / after yet.")
+                notes.insert(0, f"⚠ No point on one side of {event} in these dates, so there is no before / after "
+                                "yet.")
+        if notes:
+            self.say("  ".join(notes))
 
     def _figure(self):
         if self.canvas is None:
@@ -354,10 +428,15 @@ class HistoryPage:
             return
         for r in runs_for(st, removed=self.removed_var.get()):
             off = bool(r.get("removed"))
+            status = ("(taken off)  " if off else "") + history.status_text(r)
+            if r["kind"] == "onsky" and history.judged_by(r):
+                status += f"  (judged by FLUX {history.judged_by(r)})"
+            src = r.get("source") or ""
+            if r.get("joined"):
+                src = f"{src}  ({r['joined']})"
             iid = tr.insert("", "end", values=(KIND_WORDS.get(r["kind"], r["kind"]),
-                                               str(r["started"])[:16].replace("T", " "),
-                                               ("(taken off)  " if off else "") + history.status_text(r),
-                                               r.get("source") or ""), tags=("off",) if off else ())
+                                               str(r["started"])[:16].replace("T", " "), status, src),
+                            tags=("off",) if off else ())
             self.run_rows[iid] = r
         self._buttons()
 

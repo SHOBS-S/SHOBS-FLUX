@@ -74,6 +74,23 @@ def before_after(points: list[dict], event: str) -> dict | None:
     return {"before": b, "after": a, "change": d, "change_err": de}
 
 
+def _unit_words(unit) -> str:
+    import history
+    return history.unit_words(unit)
+
+
+def y_label(points: list[dict], words: str, unit: str) -> str:
+    """'<Value name> (<unit>)': 'Read noise (e⁻)', 'Seeing in focus, FWHM (″)'. The value's own name when the points
+    say which value they are (words may carry a band: 'Zero point at airmass 1 (green (TG))'), else words."""
+    import history
+    keys = {p.get("key") for p in points or [] if p.get("key")}
+    if len(keys) == 1:
+        return history.axis_label(keys.pop(), unit)
+    name = str(words or "").replace(" (FWHM)", ", FWHM")
+    u = _unit_words(unit)
+    return f"{name} ({u})" if u else name
+
+
 def draw_trend(fig, points: list[dict], words: str, unit: str, now: dict | None = None, spec: float | None = None,
                event: str | None = None, title: str | None = None, ax=None, compact: bool = False) -> None:
     """points: from history.series_points (date, value, sigma, photometric, marginal). now: the profile's value
@@ -85,7 +102,8 @@ def draw_trend(fig, points: list[dict], words: str, unit: str, now: dict | None 
         fig.subplots_adjust(left=0.1, right=0.97, top=0.86, bottom=0.14)
     sky_plots._style(ax)
     sky_plots._title(ax, title or words)
-    ax.set_ylabel(unit or words)
+    ax.set_ylabel(y_label(points, words, unit), fontsize=8.5 if compact else 10.5)
+    unit = _unit_words(unit)
     pts = [p for p in points if _day(p["date"]) is not None and _finite(p.get("value"))]
     if not pts:
         sky_plots._empty(ax, "nothing measured for this setup in these dates")
@@ -109,6 +127,11 @@ def draw_trend(fig, points: list[dict], words: str, unit: str, now: dict | None 
                  "marginal": "marginal night (drifting)", "not photometric": "not photometric"}[name]
         ax.errorbar(x, y, yerr=e, fmt=marker, ms=6, mfc=face, mec=edge, ecolor=edge, elinewidth=1, capsize=2,
                     zorder=3, label=label, linestyle="none")
+    old = [p for p in pts if p.get("judged_by")]
+    if old:                          # values today's rules could not re-read (their on-sky log is gone): ringed
+        vers = sorted({p["judged_by"] for p in old})
+        ax.plot([_day(p["date"]) for p in old], [p["value"] for p in old], linestyle="none", marker="o", ms=11,
+                mfc="none", mec=SPEC_GREY, mew=1.2, zorder=4, label="judged by FLUX " + ", ".join(vers))
     days = [_day(p["date"]) for p in pts]
     if now and _finite(now.get("value")):
         src = now.get("source") or ""

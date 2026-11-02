@@ -109,6 +109,8 @@ def record_run(kind: str, source: str, summary: dict, camera_id: str | None = No
     profile_id, date). Returns its run key, or None when the database could not be written (never raises)."""
     key = run_key or new_run_key(kind)
     now = sp.now_iso()
+    if kind in ("onsky", "darks", "check") and isinstance(summary, dict) and "rules" not in summary:
+        summary = dict(summary, rules=RULES_VERSION)          # judged by today's rules: never judged again for them
     try:
         con = connect()
         try:
@@ -200,6 +202,11 @@ def status_text(row: dict) -> str:
     worst = summary.get("worst") if isinstance(summary, dict) else None
     if isinstance(worst, str) and worst.strip():
         return worst.strip()
+    if (row.get("kind") == "check" and isinstance(summary, dict) and "worst" not in summary and "sky" in summary
+            and "kind" not in summary):
+        # a check run logged before FLUX said why (0.1): the reason from its stored numbers, by today's rules
+        st, why = _check_verdict(summary, row.get("camera_id"))
+        return why or f"{STATUS_ICON.get(st, '')} {st}".strip()
     icon = STATUS_ICON.get(status, "")
     return f"{icon} {status}".strip()
 
@@ -240,6 +247,7 @@ VALUE_WORDS = {
     "bands.extinction_k": "Extinction k",
     "bands.fwhm_in_focus": "Seeing in focus (FWHM)",
     "bands.fwhm_defocus": "Star size defocused (FWHM)",
+    "bands.fwhm_imaging": "Seeing, imaging focus",
     "bands.sky_brightness": "Sky brightness",
     "bands.scintillation_cy": "Scintillation C_Y",
     "cadence.overhead_s": "Time lost between frames",
@@ -254,6 +262,63 @@ VALUE_WORDS = {
     "hot_pixel_ppm": "Hot pixels",
     "glow_e_per_px_s": "Edge glow",
 }
+# How a stored unit is written on the History page and the report ('' = no unit worth showing).
+UNIT_WORDS = {"e-": "e⁻", "e": "e⁻", "e-/ADU": "e⁻/ADU", "e-/px/s": "e⁻/px/s", "arcsec": "″", "″": "″",
+              "mag for 1 e-/s": "mag, 1 e⁻/s", "mag/arcsec2": "mag/″²", "mag/airmass": "mag/airmass",
+              "Young C_Y": "", "ADU": "ADU", "s": "s", "ppm": "ppm"}
+# Units that are the same thing written two ways (→ the first), and the ones a point can be converted from.
+UNIT_ALIAS = {"e": "e-", "e⁻": "e-", "″": "arcsec", "e/ADU": "e-/ADU", "e/px/s": "e-/px/s"}
+UNIT_CONVERT = {("ms", "s"): 1e-3, ("s", "ms"): 1e3, ("arcmin", "arcsec"): 60.0, ("arcsec", "arcmin"): 1 / 60.0}
+
+
+def unit_words(unit: str | None) -> str:
+    """'e-' → 'e⁻', 'arcsec' → '″', 'mag for 1 e-/s' → 'mag, 1 e⁻/s'; an unknown unit as it is."""
+    u = str(unit or "").strip()
+    return UNIT_WORDS.get(u, u)
+
+
+def axis_label(key: str, unit: str | None) -> str:
+    """The trend plot's y-axis: '<Value name> (<unit>)', e.g. 'Read noise (e⁻)', 'Seeing in focus, FWHM (″)'."""
+    words = VALUE_WORDS.get(key, key).replace(" (FWHM)", ", FWHM")
+    u = unit_words(unit)
+    return f"{words} ({u})" if u else words
+
+
+def unify_units(points: list[dict]) -> tuple[list[dict], str, str]:
+    """(points, unit, note): every point in one unit. Points written in an alias of the most common unit are taken
+    as they are; ones in a unit that converts (ms → s) are converted; any other is left out, and note says so (the
+    axis is never labelled with a unit some points are not in)."""
+    if not points:
+        return [], "", ""
+    from collections import Counter
+
+    def norm(u):
+        u = str(u or "").strip()
+        return UNIT_ALIAS.get(u, u)
+    counts = Counter(norm(p.get("unit")) for p in points)
+    unit = counts.most_common(1)[0][0]
+    if len(counts) == 1:
+        return points, points[0].get("unit") or "", ""
+    out, dropped = [], Counter()
+    for p in points:
+        u = norm(p.get("unit"))
+        if u == unit:
+            out.append(p)
+        elif (u, unit) in UNIT_CONVERT:
+            f = UNIT_CONVERT[(u, unit)]
+            q = dict(p, value=p["value"] * f, unit=unit,
+                     sigma=None if p.get("sigma") is None else p["sigma"] * f)
+            out.append(q)
+        else:
+            dropped[u or "no unit"] += 1
+    note = ""
+    if dropped:
+        n = sum(dropped.values())
+        note = (f"⚠ {n} point{'s' if n != 1 else ''} left out: recorded in "
+                + ", ".join(unit_words(u) or u for u in dropped) + f", not {unit_words(unit) or unit}.")
+    return out, unit, note
+
+
 SYSTEM_KINDS = ("onsky",)              # one row per night; "sky" runs are the combined values a save wrote
 CAMERA_KINDS = ("bench", "darks")
 
@@ -293,6 +358,50 @@ def same_system(a: str | None, b: str | None, tolerance: float = 0.03) -> bool:
     return abs(fa - fb) <= tolerance * max(fa, fb)
 
 
+def is_zero_focal(sid: str | None) -> bool:
+    """A system id made without a focal length (no FOCALLEN in the headers): '<telescope>-0mm__<camera>'."""
+    _t, f, c = parse_system_id(sid)
+    return c is not None and not f
+
+
+def focal_setups(cam: str, ids: list | None = None) -> list[str]:
+    """The setups (one id per telescope, focal lengths within 3 % joined) this camera has WITH a focal length: from
+    the saved system profiles and the run history (ids: these instead)."""
+    if ids is None:
+        ids = [os.path.basename(p)[:-5] for p in sp.list_profiles("systems")]
+        ids += [r["system_id"] for r in _rows("SELECT DISTINCT system_id FROM runs WHERE system_id IS NOT NULL AND "
+                                             "removed = 0")]
+    out: list[str] = []
+    for sid in ids:
+        _t, f, c = parse_system_id(sid)
+        if c != cam or not f:
+            continue
+        if not any(same_system(sid, o) for o in out):
+            out.append(sid)
+    return out
+
+
+def joins_setup(row_sid: str | None, setup_id: str, _cache: dict | None = None) -> str:
+    """Why a night recorded without a focal length belongs to this setup: '' when it does not. It joins the setup of
+    the same camera when that camera has exactly ONE setup with a focal length (and no saved profile of its own
+    without one); with two or more it stays a setup of its own (FLUX cannot tell which telescope it was)."""
+    if not is_zero_focal(row_sid) or is_zero_focal(setup_id):
+        return ""
+    _t, _f, cam = parse_system_id(row_sid)
+    _t2, _f2, cam2 = parse_system_id(setup_id)
+    if cam != cam2:
+        return ""
+    cache = _cache if _cache is not None else {}
+    if cam not in cache:
+        own0 = any(is_zero_focal(os.path.basename(p)[:-5]) and parse_system_id(os.path.basename(p)[:-5])[2] == cam
+                   for p in sp.list_profiles("systems"))
+        cache[cam] = [] if own0 else focal_setups(cam)
+    homes = cache[cam]
+    if len(homes) == 1 and same_system(homes[0], setup_id):
+        return "no focal length in its headers: joined to this setup, the only one for this camera"
+    return ""
+
+
 def _rows(q: str, args=()) -> list[dict]:
     try:
         con = connect()
@@ -323,8 +432,12 @@ def setups() -> list[dict]:
             words += f" ({tel['focal_mm']:g} mm)"
         out.append({"kind": "system", "id": pid, "words": words, "path": path})
         seen_sys.append(pid)
-    for r in _rows("SELECT DISTINCT system_id FROM runs WHERE system_id IS NOT NULL AND removed = 0"):
-        sid = r["system_id"]
+    run_ids = [r["system_id"] for r in _rows("SELECT DISTINCT system_id FROM runs WHERE system_id IS NOT NULL AND "
+                                             "removed = 0")]
+    cache: dict = {}
+    for sid in sorted(run_ids, key=is_zero_focal):             # setups with a focal length first
+        if sid and is_zero_focal(sid) and any(joins_setup(sid, s, cache) for s in seen_sys):
+            continue                                            # joined to its camera's one setup
         if sid and not any(same_system(sid, s) for s in seen_sys):
             _t, f, _c = parse_system_id(sid)
             note = "no profile saved" + ("; no focal length in the headers" if not f else "")
@@ -348,7 +461,7 @@ def _setup_rows(kind: str, sid: str, include_removed: bool = False) -> list[dict
     """Every value row of one setup with its run (newest run first)."""
     kinds = SYSTEM_KINDS if kind == "system" else CAMERA_KINDS
     q = ("SELECT v.key, v.channel, v.value, v.sigma, v.unit, v.source, v.date, v.profile_id, r.run_key, r.kind, "
-         "r.started, r.source AS run_source, r.status, r.system_id, r.camera_id, r.summary, r.removed "
+         "r.started, r.source AS run_source, r.status, r.system_id, r.camera_id, r.summary, r.removed, r.app "
          "FROM run_values v JOIN runs r ON r.id = v.run_id WHERE r.kind IN (" + ",".join("?" * len(kinds)) + ")")
     args: list = list(kinds)
     if not include_removed:
@@ -356,7 +469,17 @@ def _setup_rows(kind: str, sid: str, include_removed: bool = False) -> list[dict
     q += " ORDER BY r.id DESC"
     rows = _rows(q, args)
     if kind == "system":
-        return [r for r in rows if same_system(r.get("system_id") or r.get("profile_id"), sid)]
+        cache: dict = {}
+        out = []
+        for r in rows:
+            rs = r.get("system_id") or r.get("profile_id")
+            if same_system(rs, sid):
+                out.append(r)
+            else:
+                why = joins_setup(rs, sid, cache)
+                if why:
+                    out.append(dict(r, joined=why))
+        return out
     return [r for r in rows if (r.get("profile_id") or r.get("camera_id")) == sid]
 
 
@@ -410,7 +533,9 @@ def series_points(kind: str, sid: str, key: str | None = None, channel: str | No
                       "started": r["started"], "target": summ.get("target") or "",
                       "photometric": summ.get("photometric"), "marginal": summ.get("marginal"),
                       "defocus": summ.get("defocus") or "", "source_path": r.get("run_source") or "",
-                      "removed": bool(r.get("removed"))}
+                      "removed": bool(r.get("removed")), "value_source": r.get("source") or "",
+                      "judged_by": judged_by(r) if r["kind"] == "onsky" else "",
+                      "joined": r.get("joined") or ""}
     return sorted(out.values(), key=lambda p: (p["date"], p["started"] or ""))
 
 
@@ -429,8 +554,323 @@ def set_removed(run_key: str, removed: bool = True) -> bool:
         return False
 
 
+# ---- judging older runs again by today's rules (0.5.1) ---------------------------------------------------------------
+#
+# A run's stored values are what the FLUX that logged it made of its data. When the rules change (0.4.1 made a
+# drifting night "marginal"; 0.5 judges a lone night's focus against the setup's own seeing), the History page would
+# keep showing the old verdicts. rejudge() reads every run logged before RULES_VERSION again:
+#   on-sky nights  their log (still under ~/.shobs/onsky) goes through today's onsky engine with the rest of its
+#                  setup's nights, exactly as the Sky page reads them; the run's values are REPLACED by the fresh ones
+#                  and the old values and summary are kept in the run's summary under "before_rejudge" (traceable).
+#                  When the log is gone the stored values stay, and their points say "judged by FLUX <version>".
+#   dark runs      gain the read noise their summary measured (read_noise_e, source "darks").
+#   check runs     logged without a reason (FLUX 0.1) get one from their stored numbers.
+# A run judged again carries "rules": RULES_VERSION in its summary; raising RULES_VERSION makes it happen again.
+
+RULES_VERSION = "0.5.1"
+
+
+def _version(text) -> tuple | None:
+    """'SHOBS-FLUX 0.4.0' / '0.4.1' → (0, 4, 1); anything else (a test's 'test') → None."""
+    import re
+    m = re.search(r"(\d+)\.(\d+)(?:\.(\d+))?", str(text or ""))
+    return (int(m.group(1)), int(m.group(2)), int(m.group(3) or 0)) if m else None
+
+
+def _summary(row) -> dict:
+    try:
+        s = json.loads(row.get("summary") or "{}")
+    except (TypeError, ValueError):
+        s = {}
+    return s if isinstance(s, dict) else {}
+
+
+def judged_by(row) -> str:
+    """'' when the run's values follow today's rules; else the FLUX version whose rules they follow ('0.4.0')."""
+    s = _summary(row)
+    if _version(s.get("rules")) is not None and _version(s["rules"]) >= _version(RULES_VERSION):
+        return ""
+    v = _version(row.get("app"))
+    if v is None or v >= _version(RULES_VERSION):
+        return ""
+    return ".".join(str(x) for x in v)
+
+
+def stale_runs() -> list[dict]:
+    """The runs logged before today's rules that rejudge() would look at (cheap: no file is read)."""
+    rows = _rows("SELECT * FROM runs WHERE kind IN ('onsky', 'darks', 'check') ORDER BY id")
+    out = []
+    for r in rows:
+        if not judged_by(r):
+            continue
+        s = _summary(r)
+        if r["kind"] == "check" and (s.get("worst") is not None or "kind" in s or "sky" not in s):
+            continue                                   # already says why, or a calibration frame
+        if r["kind"] == "onsky" and s.get("rejudge_failed") == RULES_VERSION:
+            continue                                   # its log was gone last time: looked for again below
+        out.append(r)
+    # on-sky runs whose log was gone last time: only when the log has come back
+    for r in rows:
+        s = _summary(r)
+        if r["kind"] == "onsky" and judged_by(r) and s.get("rejudge_failed") == RULES_VERSION and _find_log(r):
+            out.append(r)
+    return out
+
+
+def _basename(path: str) -> str:
+    return str(path or "").replace("\\", "/").rsplit("/", 1)[-1]
+
+
+def _find_log(row) -> str | None:
+    """The on-sky log a run read: its own path when it is still there, else the same file name in the on-sky folder
+    (a data folder copied from another computer, or a path written on Windows)."""
+    src = row.get("source") or ""
+    if src and os.path.isfile(src):
+        return src
+    name = _basename(src) or _basename(_summary(row).get("log") or "")
+    if not name:
+        return None
+    p = os.path.join(sp.onsky_dir(make=False), name)
+    return p if os.path.isfile(p) else None
+
+
+def _check_verdict(s: dict, camera_id: str | None) -> tuple[str, str]:
+    """(status, worst) for a check run logged without a reason, from its stored numbers (today's rules where the
+    numbers allow: a few saturated field stars are a ⚠ note, not a ✖)."""
+    found: list[tuple[str, str]] = []
+    n_stars = s.get("n_stars")
+    if n_stars == 0:
+        found.append(("bad", "no stars found"))
+    sky = s.get("sky") if isinstance(s.get("sky"), dict) else {}
+    bias, lin = sp._finite(s.get("bias_adu")), sp._finite(s.get("linear_limit"))
+    adus = [sp._finite(c.get("adu")) for c in sky.values() if isinstance(c, dict)]
+    adus = [a for a in adus if a is not None]
+    if adus and bias is not None and lin and lin > bias:
+        frac = (max(adus) - bias) / (lin - bias)
+        if frac > 0.5:
+            found.append(("bad", "sky over half the linear range"))
+        elif frac > 0.25:
+            found.append(("info", f"sky {frac:.0%} of the linear range"))
+    if s.get("gain_source") == "estimate":
+        found.append(("warn", "gain is a guess"))
+    es = [sp._finite(c.get("e")) for c in sky.values() if isinstance(c, dict)]
+    es = [e for e in es if e is not None]
+    rn = None
+    if camera_id and es:
+        cam = sp.find_camera_profile(camera_id)
+        rn, _rec = sp.camera_value(cam, "read_noise_e") if cam else (None, None)
+        rn = sp._finite(rn)
+    if rn and es and min(es) / (rn * rn) < 3:
+        found.append(("warn", "read-noise-limited"))
+    n_sat, n_lin = s.get("n_saturated_stars") or 0, s.get("n_over_linear") or 0
+    if n_sat:
+        found.append(("warn", f"{n_sat} field star{'s' if n_sat != 1 else ''} saturated"))
+    if n_lin:
+        found.append(("info", f"{n_lin} field star{'s' if n_lin != 1 else ''} over the linear limit"))
+    for kind, icon in (("bad", "✖ "), ("warn", "⚠ ")):
+        words = [w for k, w in found if k == kind]
+        if words:
+            return kind, icon + "; ".join(words[:2])
+    info = [w for k, w in found if k == "info"]
+    return "ok", (info[0] if info else "")
+
+
+def _tel_numbers(cam: str, focal, profile: dict | None) -> tuple:
+    """(aperture mm, site elevation m) for a setup: the Sky page's Telescope boxes saved for it, else the profile's
+    aperture (the elevation is then not known)."""
+    ap = el = None
+    try:
+        import settings
+        prefs = settings.load()
+        for e in prefs.get("sky_telescopes") or []:
+            if not isinstance(e, dict) or e.get("camera_id") != cam:
+                continue
+            a, b = sp._finite(e.get("focal")), sp._finite(focal)
+            if (not a and not b) or (a and b and abs(a - b) <= 0.03 * max(a, b)):
+                ap, el = sp._finite(e.get("aperture_mm")), sp._finite(e.get("elevation_m"))
+                break
+    except Exception:
+        pass
+    if ap is None:
+        ap = sp._finite(((profile or {}).get("telescope") or {}).get("aperture_mm"))
+    return ap, el
+
+
+def _night_status(r) -> str:
+    """ok / warn / bad for one night, as the Sky page records it."""
+    try:
+        import sky_page
+        return sky_page.night_status(r)
+    except Exception:
+        if not r.usable or any(k == "bad" for k, _t in r.lines):
+            return "bad"
+        return "warn" if not r.photometric or any(k == "warn" for k, _t in r.lines) else "ok"
+
+
+def _ds_focal(ds):
+    return sp._finite(ds.setup.get("focal_header_mm")) or sp._finite(ds.setup.get("focal_mm"))
+
+
+def _same_setup(a, b) -> bool:
+    if a.camera_id != b.camera_id:
+        return False
+    fa, fb = _ds_focal(a), _ds_focal(b)
+    if not fa or not fb:
+        return not fa and not fb
+    return abs(fa - fb) <= 0.03 * max(fa, fb)
+
+
+def _norm(p: str) -> str:
+    return os.path.normcase(os.path.abspath(p))
+
+
+def rejudge(step=None) -> dict:
+    """Judge every run logged before RULES_VERSION again (see above). Returns {"onsky": n judged again, "kept": n
+    on-sky runs whose log is gone, "darks": n, "check": n}. Never raises for one bad run (it is left as it was)."""
+    import onsky
+    out = {"onsky": 0, "kept": 0, "darks": 0, "check": 0}
+    stale = stale_runs()
+    if not stale:
+        return out
+    updates: list[tuple] = []                  # (run id, status or None, summary, values or None)
+    # ---- check and dark runs: from their stored numbers
+    for r in stale:
+        s = _summary(r)
+        if r["kind"] == "check":
+            status, worst = _check_verdict(s, r.get("camera_id"))
+            s2 = dict(s, worst=worst or None, rules=RULES_VERSION, status_before_rejudge=r.get("status"))
+            updates.append((r["id"], status, s2, None))
+            out["check"] += 1
+        elif r["kind"] == "darks":
+            rn = sp._finite(s.get("read_noise_e"))
+            add = None
+            if rn is not None:
+                have = _rows("SELECT key, date FROM run_values WHERE run_id = ?", (r["id"],))
+                if not any(h["key"] == "read_noise_e" for h in have):
+                    day = next((h["date"] for h in have if h.get("date")), None) or str(r.get("started") or "")[:10]
+                    add = [{"key": "read_noise_e", "value": rn, "sigma": None, "unit": "e-", "source": "darks",
+                            "channel": None, "profile_id": r.get("camera_id"), "date": day}]
+            updates.append((r["id"], None, dict(s, rules=RULES_VERSION), ("add", add or [])))
+            out["darks"] += 1
+    # ---- on-sky nights: their logs through today's engine, setup by setup
+    sky_runs = [r for r in stale if r["kind"] == "onsky"]
+    if sky_runs:
+        if step:
+            step(f"Judging {len(sky_runs)} older night{'s' if len(sky_runs) != 1 else ''} by today's rules")
+        all_logs, _bad = onsky.read_logs(onsky.log_files(sp.onsky_dir(make=False)))
+        by_path = {_norm(d.path): d for d in all_logs}
+        cache: dict = {}
+        for r in sky_runs:
+            s = _summary(r)
+            path = _find_log(r)
+            ds = None
+            if path:
+                ds = by_path.get(_norm(path))
+                if ds is None:
+                    got, _b = onsky.read_logs([path])
+                    ds = got[0] if got else None
+            if ds is None:
+                out["kept"] += 1
+                if s.get("rejudge_failed") != RULES_VERSION:
+                    updates.append((r["id"], None, dict(s, rejudge_failed=RULES_VERSION), None))
+                continue
+            try:
+                res = _judge_night(ds, all_logs, r, cache)
+            except Exception as exc:                      # a damaged log never stops the others
+                try:
+                    import settings
+                    settings.log(f"re-judging run {r.get('run_key')} failed: {exc!r}")
+                except Exception:
+                    pass
+                res = None
+            if res is None:
+                out["kept"] += 1
+                if s.get("rejudge_failed") != RULES_VERSION:
+                    updates.append((r["id"], None, dict(s, rejudge_failed=RULES_VERSION), None))
+                continue
+            sid = r.get("system_id") or ""
+            old_vals = _rows("SELECT key, channel, value, sigma, unit, source, date FROM run_values WHERE run_id = ?",
+                             (r["id"],))
+            new_vals = onsky.night_values(res, sid)
+            if res.cy != res.cy and not cache.get(("tel", ds.camera_id, _ds_focal(ds)), (None, None))[1]:
+                # no site elevation known here: keep the scintillation the night was given when it was logged
+                new_vals += [dict(v, profile_id=sid) for v in old_vals if v["key"] == "bands.scintillation_cy"]
+            s2 = onsky.night_summary(res)
+            s2["rules"] = RULES_VERSION
+            s2["before_rejudge"] = {"app": r.get("app"), "status": r.get("status"),
+                                    "summary": {k: v for k, v in s.items() if k != "before_rejudge"},
+                                    "values": old_vals}
+            updates.append((r["id"], _night_status(res), s2, ("replace", new_vals)))
+            out["onsky"] += 1
+    _write_updates(updates)
+    return out
+
+
+def _judge_night(ds, all_logs: list, row: dict, cache: dict):
+    """The NightResult for one night's dataset judged with the rest of its setup (newest log per night, the setup's
+    system profile), as the Sky page would today."""
+    import onsky
+    setup = [d for d in all_logs if _same_setup(d, ds)]
+    if not any(d is ds for d in setup):
+        setup.append(ds)
+    kept, _replaced = onsky.newest_per_night(setup)
+    if not any(d is ds for d in kept):                 # an older log of a re-run night: judged in its twin's place
+        setup = [d for d in setup if d.key != ds.key] + [ds]
+    sid = row.get("system_id") or ""
+    prof = None
+    p = sp.profile_path("systems", sid, make=False) if sid else ""
+    if p and os.path.exists(p):
+        try:
+            prof = sp.load(p)
+        except sp.ProfileError:
+            prof = None
+    if prof is None:
+        try:
+            prof = sp.find_system_profile(ds.camera_id, _ds_focal(ds))
+        except Exception:
+            prof = None
+    tel_key = ("tel", ds.camera_id, _ds_focal(ds))
+    if tel_key not in cache:
+        cache[tel_key] = _tel_numbers(ds.camera_id, _ds_focal(ds), prof)
+    ap, el = cache[tel_key]
+    key = (tuple(sorted(_norm(d.path) for d in setup)), sid)
+    if key not in cache:
+        cache[key] = onsky.run_all(setup, prof, ap, el)
+    summ = cache[key]
+    me = _norm(ds.path)
+    return next((n for n in summ.nights if _norm(n.ds.path) == me), None)
+
+
+def _write_updates(updates: list) -> None:
+    if not updates:
+        return
+    try:
+        con = connect()
+        try:
+            for rid, status, summ, vals in updates:
+                js = json.dumps(_clean(summ), ensure_ascii=False, default=str, allow_nan=False)
+                if status is None:
+                    con.execute("UPDATE runs SET summary = ? WHERE id = ?", (js, rid))
+                else:
+                    con.execute("UPDATE runs SET summary = ?, status = ? WHERE id = ?", (js, status, rid))
+                if vals:
+                    how, rows = vals
+                    if how == "replace":
+                        con.execute("DELETE FROM run_values WHERE run_id = ?", (rid,))
+                    for v in rows:
+                        con.execute("INSERT INTO run_values (run_id, profile_id, key, channel, value, sigma, unit, "
+                                    "source, date) VALUES (?,?,?,?,?,?,?,?,?)",
+                                    (rid, v.get("profile_id"), v["key"], v.get("channel"), _clean(v.get("value")),
+                                     _clean(v.get("sigma")), v.get("unit"), v.get("source"), v.get("date")))
+                con.commit()                           # one run at a time: a run is never half judged
+        finally:
+            con.close()
+    except (sqlite3.Error, OSError, TypeError, ValueError):
+        pass
+
+
 CSV_COLUMNS = ("date", "value", "sigma", "unit", "value_name", "band_or_channel", "target", "photometric", "run",
-               "kind", "recorded")
+               "kind", "recorded", "judged_by")
 
 
 def write_csv(path: str, points: list[dict], setup_words: str, version: str) -> None:
@@ -445,7 +885,8 @@ def write_csv(path: str, points: list[dict], setup_words: str, version: str) -> 
                         p.get("unit") or "", VALUE_WORDS.get(p["key"], p["key"]), p.get("channel") or "",
                         p.get("target") or "", "" if p.get("photometric") is None else
                         ("marginal" if p.get("marginal") else ("yes" if p["photometric"] else "no")),
-                        p.get("run_key") or "", p.get("kind") or "", p.get("started") or ""])
+                        p.get("run_key") or "", p.get("kind") or "", p.get("started") or "",
+                        f"FLUX {p['judged_by']}" if p.get("judged_by") else ""])
 
 
 def dtg(when=None) -> str:
