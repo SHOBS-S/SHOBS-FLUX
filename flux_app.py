@@ -598,6 +598,7 @@ class ProfilesPage:
                 tr.insert("", "end", text="dark current by temperature", values=(
                     f"{len(dc)} points", "e-/px/s", "spec", doc.get("entered", ""), doc.get("source", "")))
             return
+        import rollback
         parents: dict = {}
         for rpath, rec in sp.iter_records(doc):
             parent = ""
@@ -607,8 +608,9 @@ class ProfilesPage:
                     parents[key] = tr.insert(parent, "end", text=str(rpath[i]), open=True)
                 parent = parents[key]
             v = rec.get("value")
-            iid = tr.insert(parent, "end", text=str(rpath[-1]), values=(
-                "—" if v is None else (f"{v:g}" if isinstance(v, (int, float)) else str(v)), rec.get("unit") or "",
+            iid = tr.insert(parent, "end", text=rollback.VALUE_NAMES.get(str(rpath[-1]), str(rpath[-1])), values=(
+                "—" if v is None else (rollback.number_words(v) if isinstance(v, (int, float)) else str(v)),
+                rec.get("unit") or "",
                 SOURCE_TAG.get(rec.get("source"), rec.get("source")), rec.get("date") or "", rec.get("note") or ""))
             self.rec_paths[iid] = rpath
 
@@ -653,8 +655,9 @@ class ProfilesPage:
         rec = doc
         for p in rpath:
             rec = rec[p]
+        import rollback
         ans = simpledialog.askstring(
-            settings.APP_NAME, f"Your value for {'.'.join(str(p) for p in rpath)} ({rec.get('unit')}).\n"
+            settings.APP_NAME, f"Your value for {rollback.value_name(rpath)} ({rec.get('unit')}).\n"
             "It is saved with the source “user” and wins over header, spec and estimates until a run measures it.",
             initialvalue="" if rec.get("value") is None else str(rec.get("value")), parent=self.app)
         if ans is None:
@@ -675,8 +678,12 @@ class ProfilesPage:
             return
         settings.log(f"user value {'.'.join(str(p) for p in rpath)} = {val:g} in {path}")
         self.show()
-        set_msg(self.msg_var, self.msg, f"✔ Saved {val:g} {rec.get('unit') or ''}; the previous revision is in the "
-                                        "history folder.")
+        done = sp.load(path) if os.path.exists(path) else doc
+        redone = [rollback.value_name(("values", k)) for k in ("full_well_e", "linear_limit_adu")
+                  if (doc.get("values") or {}).get(k) != (done.get("values") or {}).get(k)]
+        set_msg(self.msg_var, self.msg, f"✔ Saved {rollback.number_words(val)} {rec.get('unit') or ''}; the previous "
+                                        "revision is in the history folder." +
+                (f" Worked out again from it: {', '.join(redone).lower()}." if redone else ""))
 
 
 class RollbackDialog(tk.Toplevel):
@@ -704,9 +711,11 @@ class RollbackDialog(tk.Toplevel):
                                                               "Differs from now")):
             self.tree.heading(c, text=words)
             self.tree.column(c, width=px(app, w), stretch=(c == "by"))
+        self.now_var = tk.StringVar()
+        ttk.Label(body, textvariable=self.now_var, style="Section.TLabel").pack(anchor="w", pady=(0, px(app, 4)))
         self.tree.pack(fill=tk.X)
         self.tree.bind("<<TreeviewSelect>>", lambda _e: self.show())
-        ttk.Label(body, text="Values in that revision → in the profile now", style="Section.TLabel").pack(
+        ttk.Label(body, text="Values in that revision → in the revision in use now", style="Section.TLabel").pack(
             anchor="w", pady=(px(app, 8), 0))
         tf = ttk.Frame(body, style="Card.TFrame")
         tf.pack(fill=tk.BOTH, expand=True)
@@ -725,6 +734,17 @@ class RollbackDialog(tk.Toplevel):
         self.put_btn.pack(side=tk.LEFT)
         ttk.Button(btns, text="Close", command=self.destroy).pack(side=tk.RIGHT)
         self.revs = rollback.revisions(path)
+        try:
+            now_doc = sp.load(path)
+        except sp.ProfileError:
+            now_doc = {}
+        self.now_revision = now_doc.get("revision")
+        rb = now_doc.get("rolled_back") if isinstance(now_doc.get("rolled_back"), dict) else {}
+        self.now_var.set(f"Now using revision {self.now_revision}" +
+                         (f" (revision {rb['to_revision']} put back)" if rb.get("as_revision") == self.now_revision
+                          and rb.get("to_revision") is not None else "") +
+                         (f", updated {str(now_doc.get('updated'))[:10]}" if now_doc.get("updated") else "") + "."
+                         if self.now_revision is not None else "")
         self.rows: dict[str, dict] = {}
         try:
             self.grab_set()                       # one roll-back at a time
@@ -748,6 +768,7 @@ class RollbackDialog(tk.Toplevel):
         return self.rows.get(sel[0]) if sel else None
 
     def show(self):
+        import rollback
         r = self.chosen()
         self.text.configure(state="normal")
         self.text.delete("1.0", tk.END)
@@ -758,7 +779,8 @@ class RollbackDialog(tk.Toplevel):
         elif not r["changes"]:
             self.text.insert("1.0", "Every value is the same as in the profile now (only dates or notes differ).")
         else:
-            self.text.insert("1.0", "\n".join(f"{name}:   {old}   →   {new}" for name, old, new in r["changes"]))
+            self.text.insert("1.0", "\n".join(f"{rollback.value_name(name)}:   {old}   →   {new}"
+                                               for name, old, new in r["changes"]))
         self.text.configure(state="disabled")
         ok = bool(r and r.get("doc") is not None)
         self.put_btn.state(["!disabled"] if ok else ["disabled"])

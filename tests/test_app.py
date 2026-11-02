@@ -95,7 +95,7 @@ class TestApp(TempData):
         pp.tree.selection_set(iid)
         with mock.patch("flux_app.simpledialog.askstring", return_value="32000"):
             pp.set_value()
-        self.assertIn("Saved 32000", pp.msg_var.get())
+        self.assertIn("Saved 32,000", pp.msg_var.get())      # 0.5.1: thousands separators
         doc = sp.find_camera_profile(cam_id)
         self.assertEqual(doc["values"]["linear_limit_adu"]["value"], 32000.0)
         self.assertEqual(doc["values"]["linear_limit_adu"]["source"], "user")
