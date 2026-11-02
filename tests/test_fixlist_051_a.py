@@ -340,6 +340,33 @@ class TestSkyPageFolder(TempData):
         e = sky_page.tel_entry(self.app.prefs["sky_telescopes"], synth_sky.ZWO["camera_id"], 2900.0)
         self.assertEqual(e["frames_are"], "imaging")
 
+    def test_failed_profile_save_leaves_no_log(self):
+        """Fable review 0.5.1: the profile is saved first, so a failed save leaves no folder log and no runs."""
+        import sky_page
+        sp.save_profile(PROF, "test")
+        page = self._app()
+        folder = self.path("lights")
+        os.makedirs(folder)
+        calls = {}
+        with mock.patch.dict(sys.modules, {"sky_folder": self._fake(calls)}):
+            page.source_var.set(sky_page.SOURCES[1][0])
+            page.source_changed()
+            page.set_folder(folder)
+            self.assertTrue(self.app.jobs.wait(30))
+            page.name_var.set("14in RC")
+            page.aperture_var.set("356")
+            page.run()
+            self.assertTrue(self.app.jobs.wait(120))
+            n_files = len(os.listdir(sp.onsky_dir()))
+            page.save()
+            dlg = [w for w in self.app.winfo_children() if isinstance(w, sky_page.SaveDialog)][-1]
+            with mock.patch("sky_page.sp.save_profile", side_effect=OSError("disk full")):
+                dlg.ok()
+            self.assertTrue(page.msg_var.get().startswith("✖"), page.msg_var.get())
+            self.assertNotIn("saved", calls)
+            self.assertEqual(len(os.listdir(sp.onsky_dir())), n_files)
+            self.assertEqual(history.recent_runs(50, removed=True), [])
+
     def test_unsaved_run_never_read_again(self):
         import sky_page
         sp.save_profile(PROF, "test")
@@ -426,6 +453,22 @@ class TestCleanup(TempData):
         history.set_removed(unsaved, False)
         self.assertEqual(sky_page.cleanup_unsaved_folder_runs(prefs), [])
         self.assertIn(unsaved, {r["run_key"] for r in history.recent_runs(50)})
+
+    def test_marker_waits_until_all_marked(self):
+        """Fable review 0.5.1: when a run cannot be marked (database busy) the clean-up is tried again next start."""
+        import sky_page
+        a = _onsky_row("2026-10-06", "2026-10-06__m-45__flux-20261101T172925-972d.json", self.SID)
+        b = _onsky_row("2026-10-07", "2026-10-07__m-45__flux-20261101T173745-1bc6.json", self.SID)
+        real = history.set_removed
+        with mock.patch("history.set_removed", side_effect=lambda k, r=True: False if k == b else real(k, r)):
+            got = sky_page.cleanup_unsaved_folder_runs(settings.load())
+        self.assertEqual([r["run_key"] for r in got], [a])
+        prefs = settings.load()
+        self.assertFalse(prefs.get(sky_page.CLEANUP_PREF))
+        got = sky_page.cleanup_unsaved_folder_runs(prefs)
+        self.assertEqual([r["run_key"] for r in got], [b])
+        self.assertTrue(settings.load().get(sky_page.CLEANUP_PREF))
+        self.assertEqual(history.recent_runs(50), [])
 
     @unittest.skipUnless(os.path.isdir(REAL), "John's data copy is not here")
     def test_johns_real_copy(self):

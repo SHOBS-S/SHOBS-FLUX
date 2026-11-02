@@ -81,8 +81,8 @@ own system's numbers instead of guesses.
   apart as "Seeing, imaging focus" (never mixed with photometry seeing); several runs of the same night count as one
   night; a folder run is recorded in the history only when you **Save** it (Run is a look). A one-time clean-up takes
   folder runs that 0.5.0 recorded but were never saved off the History page (nothing is deleted).
-- History: older runs are judged again by today's rules (a +125-step defocused night is no longer "seeing in
-  focus"); dark runs record read noise; old check runs say why; axis labels name the value and unit; nights with no
+- History: older runs are judged again by today's rules and today's camera profiles (a +125-step defocused
+  night is no longer "seeing in focus"; the old values are kept with the run); dark runs record read noise; old check runs say why; axis labels name the value and unit; nights with no
   focal length in their headers join their camera's setup.
 - System report: camera QE in the band worked out from the maker's QE curve when the box is left blank; big numbers
   with separators (15,800); "(assumed)" shown wherever an assumed value is used; 0 mirrors explained; shared copies

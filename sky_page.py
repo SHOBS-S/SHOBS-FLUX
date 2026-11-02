@@ -219,7 +219,7 @@ def cleanup_unsaved_folder_runs(prefs: dict) -> list:
     if prefs.get(CLEANUP_PREF):
         return []
     try:
-        got = history.remove_unsaved_folder_runs()
+        got, wanted = history.remove_unsaved_folder_runs()
     except Exception as exc:                              # never stops FLUX from opening; tried again next start
         settings.log(f"0.5.1 clean-up of unsaved folder runs failed: {exc!r}")
         return []
@@ -228,7 +228,11 @@ def cleanup_unsaved_folder_runs(prefs: dict) -> list:
         if r["log"] and r["log"] not in skip:
             skip.append(r["log"])
     prefs[SCRATCH_PREF] = skip
-    prefs[CLEANUP_PREF] = sp.now_iso()
+    if len(got) == wanted:                                # all marked: done for good; else tried again next start
+        prefs[CLEANUP_PREF] = sp.now_iso()
+    else:
+        settings.log(f"0.5.1 clean-up: only {len(got)} of {wanted} unsaved folder runs could be marked; "
+                     "trying again next start")
     settings.save(prefs)
     if got:
         settings.log("0.5.1 clean-up: " + _plural(len(got), "folder-of-lights run") + " never saved taken off the "
@@ -931,7 +935,7 @@ class SkyPage:
                 return r
         return None
 
-    def _write_folder_log(self, res: SkyRun) -> bool:
+    def _write_folder_log(self, res: SkyRun, profile_saved: bool = False) -> bool:
         """Write a saved folder run's on-sky log (it was kept in memory since Run). False when it could not be."""
         if res.source != "folder" or res.new_doc is None or res.log_written:
             return True
@@ -939,7 +943,12 @@ class SkyPage:
             import sky_folder
             path = sky_folder.save_log(res.new_doc)
         except Exception as exc:
-            self._say(f"✖ The night's on-sky log could not be written ({exc}); nothing was saved.")
+            if profile_saved:
+                self._say(f"⚠ Saved to the system profile, but the night's on-sky log could not be written ({exc}), "
+                          "so the night is not in the run history. Save again to add it.")
+            else:
+                self._say(f"✖ The night's on-sky log could not be written ({exc}); nothing was saved.")
+            settings.log(f"folder log write failed: {exc!r}")
             return False
         old = os.path.normcase(os.path.abspath(res.new_log))
         for d in res.datasets:
@@ -1062,13 +1071,13 @@ class SkyPage:
         doc = onsky.apply_to_profile(s, old, settings.WRITTEN_BY, run_key, keep_user, system_id=pid, cam_id=cam,
                                      telescope=telescope, setup=ds.setup)
         doc["profile_id"] = pid
-        if not self._write_folder_log(res):
-            return
-        try:
+        try:                                             # the profile first: a failed save leaves no log behind
             path = sp.save_profile(doc, settings.WRITTEN_BY)
         except (sp.ProfileError, OSError) as exc:
             self._say(f"✖ The system profile could not be saved ({exc}).")
             return
+        if not self._write_folder_log(res, profile_saved=True):
+            return                                       # the profile is saved; the night is not in the history
         if not res.recorded:                             # the nights used go into the run history now, once
             n_new = self._record_nights(res, pid)
             res.recorded = True

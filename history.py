@@ -616,9 +616,9 @@ def unsaved_folder_runs() -> list[dict]:
 
 def remove_unsaved_folder_runs() -> list[dict]:
     """The 0.5.1 clean-up: mark every unsaved folder run removed (nothing is deleted; History can put one back).
-    Returns the runs marked."""
+    Returns (the runs marked, how many there were to mark)."""
     got = unsaved_folder_runs()
-    return [r for r in got if set_removed(r["run_key"], True)]
+    return [r for r in got if set_removed(r["run_key"], True)], len(got)
 
 
 # ---- judging older runs again by today's rules (0.5.1) ---------------------------------------------------------------
@@ -665,7 +665,7 @@ def judged_by(row) -> str:
 
 def stale_runs() -> list[dict]:
     """The runs logged before today's rules that rejudge() would look at (cheap: no file is read)."""
-    rows = _rows("SELECT * FROM runs WHERE kind IN ('onsky', 'darks', 'check') ORDER BY id")
+    rows = _rows("SELECT * FROM runs WHERE kind IN ('onsky', 'darks', 'check') AND removed = 0 ORDER BY id")
     out = []
     for r in rows:
         if not judged_by(r):
@@ -703,7 +703,8 @@ def _find_log(row) -> str | None:
 
 def _check_verdict(s: dict, camera_id: str | None) -> tuple[str, str]:
     """(status, worst) for a check run logged without a reason, from its stored numbers (today's rules where the
-    numbers allow: a few saturated field stars are a ⚠ note, not a ✖)."""
+    numbers allow: a few saturated field stars are a ⚠ note, not a ✖). "Read-noise-limited" uses the camera
+    profile's read noise as it is today, not what was known when the frame was checked."""
     found: list[tuple[str, str]] = []
     n_stars = s.get("n_stars")
     if n_stars == 0:
@@ -938,8 +939,12 @@ def _write_updates(updates: list) -> None:
                 con.commit()                           # one run at a time: a run is never half judged
         finally:
             con.close()
-    except (sqlite3.Error, OSError, TypeError, ValueError):
-        pass
+    except (sqlite3.Error, OSError, TypeError, ValueError) as exc:   # runs already written stay written
+        try:
+            import settings
+            settings.log(f"re-judge write failed (later runs left as they were): {exc!r}")
+        except Exception:
+            pass
 
 
 CSV_COLUMNS = ("date", "value", "sigma", "unit", "value_name", "band_or_channel", "target", "photometric", "run",

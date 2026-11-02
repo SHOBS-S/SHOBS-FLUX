@@ -465,6 +465,12 @@ class HistoryPage:
         self.pick_setup(keep_value=True)
         after = self.value_var.get().split("   (")[0]
         text = "✔ Taken off the page." if remove else "✔ Put back."
+        if not remove:
+            scratch = {str(n).lower() for n in (self.app.prefs.get("sky_scratch_logs") or [])}
+            log = str(r.get("source") or "").replace("\\", "/").rsplit("/", 1)[-1].lower()
+            if log and log in scratch:
+                text += (" This run was never saved, so the Sky page still leaves its night out: run that folder "
+                         "again on the Sky page and Save to use it.")
         if before and after != before:
             text += f" {before} has no point left, so {after or 'nothing'} is shown."
         self.say(text)

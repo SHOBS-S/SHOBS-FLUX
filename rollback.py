@@ -78,6 +78,7 @@ def revisions(path: str) -> list[dict]:
     kind, pid = _kind_pid(path)
     try:
         now = sp.load(path)
+        sp.rederive(now)                 # a file saved stale by 0.5.0 compares as it is used now
     except sp.ProfileError:
         now = None
     out = []

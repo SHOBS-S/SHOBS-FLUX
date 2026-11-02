@@ -97,8 +97,8 @@ def num(v, nd: int = 4) -> str:
     v = _f(v)
     if v is None:
         return "—"
-    if abs(v) >= 1000:
-        return f"{v:,.0f}"
+    if abs(v) >= 1000:                                  # keep one decimal on a smallish number with a fraction
+        return f"{v:,.1f}" if abs(v) < 1e5 and abs(v - round(v)) >= 0.05 else f"{v:,.0f}"
     if v == 0:
         return "0"
     txt = f"{v:.{nd}g}"
@@ -236,7 +236,11 @@ def band_qe(spec: dict | None, band: str, cam: dict | None = None) -> dict | Non
     if "percent" in unit or "%" in unit or top > 1.5:
         avg /= 100.0
     peak = None
-    if "relative" in unit or "of the" in unit:
+    # relative (percent of the peak) unless the spec says absolute: a unit naming relative / "of the peak", or a
+    # curve that tops out at ~100 % (or 1.0) of itself (no sensor reaches 100 % QE) is scaled by the peak QE
+    says_absolute = "absolute" in unit and not any(w in unit for w in ("not absolute", "relative"))
+    relative = not says_absolute and ("relative" in unit or "of the" in unit or top >= 95.0 or 0.99 <= top <= 1.0)
+    if relative:
         peak = _f(sp.camera_value(cam, "qe_peak")[0]) if cam else None
         if peak is None:
             peak = _f(((spec or {}).get("points") or {}).get("qe_peak"))
