@@ -54,19 +54,32 @@ def resolve_system_id(name: str, focal, cam: str) -> str:
     """The system profile id for this telescope name, camera and focal length. ASIAIR writes the plate-solved focal
     length into FOCALLEN, so it moves a few mm from night to night (John's 14" RC: 2898-2906 mm). An existing profile
     of the SAME telescope name and camera within 3 % is that telescope: its id is kept (0.5.3; before, a run whose
-    median came out 2902 tried to make a second profile beside the 2903 one)."""
+    median came out 2902 tried to make a second profile beside the 2903 one). Exact file first, then the nearest
+    same-name profile; a profile with no focal length only matches a run with none (same_focal)."""
     pid = sp.system_id(name, focal, cam)
     if os.path.exists(sp.profile_path("systems", pid, make=False)):
         return pid
+    want = sp.slug(name)
+    best = None
     try:
-        other = sp.find_system_profile(cam, focal)
+        paths = sp.list_profiles("systems")
     except Exception:
-        other = None
-    if other and other.get("profile_id"):
-        oname = (other.get("telescope") or {}).get("name") or ""
-        if sp.slug(oname) == sp.slug(name):
-            return other["profile_id"]
-    return pid
+        paths = []
+    for path in paths:
+        try:
+            doc = sp.load(path)
+        except Exception:
+            continue
+        if doc.get("camera_profile") != cam or not doc.get("profile_id"):
+            continue
+        tel = doc.get("telescope") or {}
+        if sp.slug(tel.get("name") or "") != want or not same_focal(tel.get("focal_mm"), focal):
+            continue
+        f, g = sp._finite(tel.get("focal_mm")), sp._finite(focal)
+        d = abs(f - g) if f is not None and g is not None else 0.0
+        if best is None or d < best[0]:
+            best = (d, doc["profile_id"])
+    return best[1] if best else pid
 
 
 def same_focal(a, b) -> bool:

@@ -38,6 +38,24 @@ class TestResolveId(TempData):
         for f in (2898.0, 2902.0, 2906.0):
             self.assertEqual(sky_page.resolve_system_id("iOptron 14 RC", f, CAM), pid, f)
         self.assertEqual(sky_page.resolve_system_id("ioptron 14 rc", 2902.0, CAM), pid)   # slug, not spelling
+        self.assertEqual(sky_page.resolve_system_id("iOptron 14 RC", 2990.0, CAM), pid)   # inside 3 %
+        self.assertNotEqual(sky_page.resolve_system_id("iOptron 14 RC", 3000.0, CAM), pid)  # outside 3 %
+
+    def test_no_focal_profile_does_not_capture(self):
+        """Fable 0.5.3: a same-name profile with no focal length (a -0mm id) must not take a 2902 or reducer run."""
+        import sky_page
+        pid = old_profile()
+        zero = old_profile(focal=None)
+        self.assertEqual(sky_page.resolve_system_id("iOptron 14 RC", 2902.0, CAM), pid)
+        self.assertNotEqual(sky_page.resolve_system_id("iOptron 14 RC", 2102.0, CAM), zero)
+        self.assertEqual(sky_page.resolve_system_id("iOptron 14 RC", None, CAM), zero)
+
+    def test_nearer_other_name_does_not_hide_ours(self):
+        """Fable 0.5.3: Borrowed RC at 2902 is nearer to a 2901 run, but the iOptron 14 RC at 2903 is still ours."""
+        import sky_page
+        pid = old_profile()
+        old_profile(name="Borrowed RC", focal=2902.0)
+        self.assertEqual(sky_page.resolve_system_id("iOptron 14 RC", 2901.0, CAM), pid)
 
     def test_other_names_and_far_focal_get_their_own(self):
         import sky_page
@@ -78,7 +96,7 @@ class TestSaveUpdatesInPlace(TempData):
             self.assertEqual(page.system_id(ask=False), pid)
             page.save()
             dlg = [w for w in app.winfo_children() if isinstance(w, sky_page.SaveDialog)][-1]
-            self.assertIs(dlg.old is not None, True)             # "It exists: ... replace the old ones"
+            self.assertIsNotNone(dlg.old)             # "It exists: ... replace the old ones"
             dlg.ok()
             self.assertTrue(page.msg_var.get().startswith("✔"), page.msg_var.get())
         finally:
