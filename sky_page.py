@@ -50,6 +50,25 @@ SCRATCH_PREF = "sky_scratch_logs"                    # folder-run logs never sav
 TEL_FIELDS = ("name", "aperture_mm", "elevation_m", "lat", "lon")
 
 
+def resolve_system_id(name: str, focal, cam: str) -> str:
+    """The system profile id for this telescope name, camera and focal length. ASIAIR writes the plate-solved focal
+    length into FOCALLEN, so it moves a few mm from night to night (John's 14" RC: 2898-2906 mm). An existing profile
+    of the SAME telescope name and camera within 3 % is that telescope: its id is kept (0.5.3; before, a run whose
+    median came out 2902 tried to make a second profile beside the 2903 one)."""
+    pid = sp.system_id(name, focal, cam)
+    if os.path.exists(sp.profile_path("systems", pid, make=False)):
+        return pid
+    try:
+        other = sp.find_system_profile(cam, focal)
+    except Exception:
+        other = None
+    if other and other.get("profile_id"):
+        oname = (other.get("telescope") or {}).get("name") or ""
+        if sp.slug(oname) == sp.slug(name):
+            return other["profile_id"]
+    return pid
+
+
 def same_focal(a, b) -> bool:
     """Two focal lengths are one setup within 3 % (both unknown counts as the same)."""
     a, b = sp._finite(a), sp._finite(b)
@@ -1012,7 +1031,7 @@ class SkyPage:
             self._tel_store()
         if not name:
             return None
-        return sp.system_id(name, focal_of(res.datasets), camera_of(res))
+        return resolve_system_id(name, focal_of(res.datasets), camera_of(res))
 
     def current_profile(self, datasets=None, name=None):
         """The system profile these nights would go into: the one named after the telescope when it exists, else the
@@ -1024,7 +1043,7 @@ class SkyPage:
         cam = Counter(d.camera_id for d in datasets).most_common(1)[0][0]
         focal = focal_of(datasets)
         if name:
-            path = sp.profile_path("systems", sp.system_id(name, focal, cam), make=False)
+            path = sp.profile_path("systems", resolve_system_id(name, focal, cam), make=False)
             if os.path.exists(path):
                 try:
                     return sp.load(path)
@@ -1512,7 +1531,7 @@ class SaveDialog(tk.Toplevel):
         if other and other.get("profile_id") != pid:
             oname = (other.get("telescope") or {}).get("name") or "?"
             ttk.Label(body, text=f"⚠ There is already a system profile for this camera at this focal length: "
-                                 f"{other.get('profile_id')} (telescope “{oname}”). Saving here makes a second one; "
+                                 f"{other.get('profile_id')} (telescope “{oname}”). Its telescope name is different, so saving here makes a second one; "
                                  f"Cancel and type “{oname}” as the telescope name to update that one instead.",
                       style="Warn.TLabel", wraplength=px(app, 560), justify=tk.LEFT).pack(anchor="w",
                                                                                          pady=(0, px(app, 6)))

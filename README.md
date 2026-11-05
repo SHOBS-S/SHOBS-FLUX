@@ -74,6 +74,16 @@ own system's numbers instead of guesses.
   before / after split, and the methods and caveats. A **shared copy** leaves out the site (latitude, longitude,
   elevation) and the file locations on your computer.
 
+## New in 0.5.3
+
+- Save to system profile updates your existing profile even when this run's focal length came out a few mm
+  different. ASIAIR writes the plate-solved focal length into FOCALLEN, so it moves from night to night (2898–2906 mm
+  on a 14" RC); 0.5.2 named the profile from each run's focal length and offered to make a second one
+  (ioptron-14-rc-2902mm beside ioptron-14-rc-2903mm). Now the same telescope name and camera within 3 % is the same
+  profile: it keeps its name and focal length, and the Save dialog shows its current values.
+- The "There is already a system profile…" warning only appears when the other profile's telescope name is
+  different.
+
 ## New in 0.5.2
 
 - Reads SHOBS-P 2.3.0's on-sky logs (log format 2). 0.5.1 refused them as "cannot be read". FLUX now uses the
