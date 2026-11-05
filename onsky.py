@@ -89,6 +89,22 @@ class OnSkyError(Exception):
     """A log or folder FLUX cannot learn from (the message is a plain sentence)."""
 
 
+class OnSkyNewerError(OnSkyError):
+    """A log written by a NEWER SHOBS-P (a format version this FLUX does not read yet): the file is fine, FLUX is
+    behind. Leave it where it is and update SHOBS-FLUX."""
+
+
+NEWER_WORDS = "written by a newer SHOBS-P"     # how a newer-format log is named on the Sky page
+
+# what the electron scale of a log rests on (Dataset.scale)
+SCALE_LOG = "log"            # format 2: SHOBS-P wrote electrons per unit at each star (gain, binning, flat in)
+SCALE_LOG_LOWER = "log-lower"  # format 2, but from the sky's own noise (no EGAIN): a lower limit (too few electrons)
+SCALE_CAMERA = "camera"      # worked out here from the gain: format 1 (or a format-2 log with no gain): the master
+                             # flat's factor is NOT in it, so its zero point can be ~0.4 mag too faint on an OSC
+SCALE_ADU_SUM = "adu-sum"    # a FLUX folder run: sums of raw ADU, one ADU = gain electrons (exact)
+SCALE_EXACT = (SCALE_LOG, SCALE_ADU_SUM)
+
+
 # ---- one night as FLUX sees it --------------------------------------------------------------------------------------
 
 @dataclass
@@ -107,7 +123,7 @@ class Dataset:
     color: str                          # R / G / B / L (luminance) / M (mono)
     gain: float | None                  # e⁻/ADU used
     gain_source: str                    # "measured" (camera profile) / "header" (EGAIN) / "none"
-    e_per_unit: float | None            # electrons per unit of the log's flux and sky
+    e_per_unit: float | None            # electrons per unit of the log's sky (and its flux when e_star is None)
     raw_px_per_px: int                  # raw camera pixels along one side of the measured pixel
     px_arcsec: float | None             # one measured pixel, arcsec
     linear_limit_adu: float | None
@@ -130,6 +146,29 @@ class Dataset:
     n_frames_in_log: int = 0
     precalibrated: bool = False
     notes: list = field(default_factory=list)
+    e_star: np.ndarray | None = None    # frames × stars: electrons per unit AT each star (format-2 SHOBS-P logs)
+    raw_sum_px: float = 1.0             # raw pixels summed into one measured pixel (read noise per measured pixel)
+    scale: str = SCALE_CAMERA           # what the electron scale rests on (SCALE_* above)
+    scale_note: str = ""                # in words, when the scale needs a caveat
+    log_version: int = 1                # the log's format_version
+
+    @property
+    def scale_exact(self) -> bool:
+        """True when the electron scale is the real one (a format-2 log with a gain, or a FLUX folder run)."""
+        return self.scale in SCALE_EXACT
+
+    def star_e(self) -> np.ndarray | None:
+        """Frames × stars: electrons per unit of each star's flux (None when no gain is known)."""
+        if self.e_star is not None:
+            return self.e_star
+        if self.e_per_unit is None:
+            return None
+        return np.full(self.flux.shape, float(self.e_per_unit))
+
+    def star_electrons(self) -> np.ndarray | None:
+        """Frames × stars: electrons in each star's aperture (NaN where not measured)."""
+        e = self.star_e()
+        return None if e is None else self.flux * e
 
     @property
     def key(self) -> tuple:
@@ -240,10 +279,18 @@ def load_dataset(path_or_doc, cam_lookup=None, path: str = "") -> Dataset:
         path = path_or_doc
         try:
             doc = sp.load(path)
+        except sp.NewerFormatError as exc:
+            raise OnSkyNewerError(f"{NEWER_WORDS} ({exc}): update SHOBS-FLUX; the file is fine, leave it where "
+                                  "it is") from None
         except sp.ProfileError as exc:
             raise OnSkyError(f"it cannot be read: {exc}") from None
     if doc.get("format") != sp.ONSKY_FORMAT:
         raise OnSkyError("it is not an on-sky log")
+    ver = doc.get("format_version")
+    if isinstance(ver, int) and not isinstance(ver, bool) and ver > sp.ONSKY_FORMAT_VERSION:
+        raise OnSkyNewerError(f"{NEWER_WORDS} (format version {ver}; this FLUX reads up to "
+                              f"{sp.ONSKY_FORMAT_VERSION}): update SHOBS-FLUX; the file is fine, leave it where it is")
+    log_version = ver if isinstance(ver, int) and not isinstance(ver, bool) and ver >= 1 else 1
     cam_lookup = cam_lookup or sp.find_camera_profile
     setup = dict(doc.get("setup") or {})
     meas = doc.get("measurement") or {}
@@ -275,6 +322,29 @@ def load_dataset(path_or_doc, cam_lookup=None, path: str = "") -> Dataset:
     else:
         per_unit_px = float(n_color * soft_bin * soft_bin)
     e_per_unit = nums["gain"] * per_unit_px if nums["gain"] else None
+    gain_used, gain_source = nums["gain"], nums["gain_source"]
+    # Format 2 (SHOBS-P 2.3.0, #55): SHOBS-P writes electrons per image unit itself, per star and per frame, with
+    # the gain, the binning, the superpixel debayer AND the master flat's value at the star in it. FLUX uses those
+    # (rescaled to the camera profile's measured gain when there is one), so nothing is guessed. Format 1 has no
+    # scale: the gain × pixels above leaves out the flat's factor (green sits ~1.3 above the flat's median on an OSC
+    # flat → zero point ~0.3–0.45 mag too faint).
+    log_scale = None
+    if meas.get("flux_is_adu_sum"):
+        scale, scale_note = SCALE_ADU_SUM, ""
+    else:
+        scale = SCALE_CAMERA
+        scale_note = ("an older SHOBS-P log (before 2.3.0): its flux scale is worked out from the gain alone and "
+                      "leaves out the master flat's factor, so its zero point can be up to ~0.4 mag too faint; "
+                      "reduce the night again in SHOBS-P 2.3.0 or later to fix it")
+        src = str(meas.get("e_per_unit_source") or "")
+        med = _f(meas.get("e_per_unit_median"))
+        if log_version >= 2 and med and med > 0 and src in ("EGAIN", "sky"):
+            log_scale = (src, med)
+        elif log_version >= 2:
+            why = str(meas.get("e_per_unit_note") or "").strip().rstrip(".")
+            scale_note = ("SHOBS-P could not write this log's electrons per unit" + (f" ({why})" if why else "")
+                          + ", so it is worked out from the gain alone and leaves out the master flat's factor: the "
+                          "zero point can be up to ~0.4 mag too faint")
     pix_um, focal = _f(setup.get("pixel_um")), _f(setup.get("focal_header_mm") or setup.get("focal_mm"))
     # pixel_um is the sensor's own pixel (shobs_profile.setup_key divides XPIXSZ by the binning); a "raw" pixel in
     # raw_px_per_px is the camera's (binned) pixel
@@ -299,6 +369,7 @@ def load_dataset(path_or_doc, cam_lookup=None, path: str = "") -> Dataset:
     flux = np.full((nf, ns), np.nan)
     peak = np.full((nf, ns), np.nan)
     idx = {n: i for i, n in enumerate(names)}
+    e_star = np.full((nf, ns), np.nan) if log_scale else None
     for fi, fr in enumerate(keep):
         for n, m in (fr.get("stars") or {}).items():
             j = idx.get(n)
@@ -308,6 +379,31 @@ def load_dataset(path_or_doc, cam_lookup=None, path: str = "") -> Dataset:
             flux[fi, j] = v if v is not None else np.nan
             p = _f(m.get("peak_adu"))
             peak[fi, j] = p if p is not None else np.nan
+            if e_star is not None:
+                e = _f(m.get("e_per_unit"))
+                e_star[fi, j] = e if e is not None and e > 0 else np.nan
+    if log_scale:
+        src, med = log_scale
+        if e_star.size:                                   # a star the log gave no scale for: the frame's median
+            e_star = np.where(np.isfinite(e_star), e_star, med)
+        hdr = _f(setup.get("e_per_adu_header"))
+        fac = 1.0
+        if src == "EGAIN" and nums["gain"] and nums["gain_source"] not in ("header", "none") and hdr:
+            fac = nums["gain"] / hdr                      # SHOBS-P used EGAIN; the camera profile knows better
+        e_star = e_star * fac
+        e_per_unit = med * fac                            # the sky: the frame's median scale (its flat in it too)
+        if src == "EGAIN":
+            scale, scale_note = SCALE_LOG, ""
+            if fac == 1.0:
+                if hdr:
+                    gain_used, gain_source = hdr, "header"
+                elif not nums["gain"]:
+                    gain_used, gain_source = None, "log"     # only the log's own scale is known
+        else:
+            scale = SCALE_LOG_LOWER
+            scale_note = ("SHOBS-P worked out this log's electrons per unit from the sky's own noise (no EGAIN in "
+                          "the frames): that is a lower limit, so the zero point is a little too faint; a camera "
+                          "profile from a bench run fixes it")
 
     def col(key):
         return np.array([_f(f.get(key)) if _f(f.get(key)) is not None else np.nan for f in keep], dtype=float)
@@ -317,14 +413,15 @@ def load_dataset(path_or_doc, cam_lookup=None, path: str = "") -> Dataset:
         written_by=str(doc.get("written_by") or ""), written=str(doc.get("written") or ""),
         run_id=str(doc.get("run_id") or ""), night=str(doc.get("night") or ""),
         target=str(doc.get("target") or "unknown"), band=band, catalog_band=cat_band, setup=setup,
-        camera_id=cam_id, color=color, gain=nums["gain"], gain_source=nums["gain_source"], e_per_unit=e_per_unit,
+        camera_id=cam_id, color=color, gain=gain_used, gain_source=gain_source, e_per_unit=e_per_unit,
         raw_px_per_px=rpp, px_arcsec=px_arcsec, linear_limit_adu=nums["linear_limit_adu"],
         read_noise_e=nums["read_noise_e"], aperture_px=_f(meas.get("aperture_radius_px")), names=names,
         cat=np.array(cats, dtype=float), jd=col("jd_mid"), airmass=col("airmass"), exptime=col("exptime_s"),
         focuspos=col("focuspos"), fwhm_px=col("fwhm_px"), sky=col("sky"), flux=flux, peak=peak,
         segment=np.array([str(f.get("segment") or "") for f in keep], dtype=object),
         cadence=doc.get("cadence") if isinstance(doc.get("cadence"), dict) else None,
-        catalog_service=str(doc.get("catalog_service") or ""), n_frames_in_log=len(frames_in), precalibrated=pre)
+        catalog_service=str(doc.get("catalog_service") or ""), n_frames_in_log=len(frames_in), precalibrated=pre,
+        e_star=e_star, raw_sum_px=per_unit_px, scale=scale, scale_note=scale_note, log_version=log_version)
     # imaging focus (guided astrophotography) is said only by a FLUX folder run; SHOBS-P's logs are photometry
     if ds.source == "SHOBS-FLUX" and str(doc.get("frames_are") or "").lower() == "imaging":
         ds.frames_are = "imaging"
@@ -504,9 +601,14 @@ def analyse(ds: Dataset, k_prior: tuple | None = None, aperture_mm: float | None
         res.why_not = f"only {nf} usable frame{'s' if nf != 1 else ''} (at least {MIN_FRAMES} needed)"
         L.append(("bad", f"✖ Not used: {res.why_not}."))
         return res
-    if ds.gain_source == "header":
+    if ds.gain_source == "header" and ds.gain:
         L.append(("info", f"Gain {ds.gain:.4f} e⁻/ADU from the frames' header (EGAIN): there is no camera profile "
                           f"for {ds.camera_id}; a bench run makes the zero point exact."))
+    if ds.scale == SCALE_LOG:
+        L.append(("info", "Electrons per image unit from SHOBS-P's log, at each star (gain, binning and the master "
+                          "flat's factor are in it)."))
+    elif ds.scale_note:
+        L.append(("warn", f"⚠ Zero point scale: {ds.scale_note}."))
     res.exptime_s = float(np.nanmedian(ds.exptime))
     _seeing(res)
     _cadence(res)
@@ -518,7 +620,7 @@ def analyse(ds: Dataset, k_prior: tuple | None = None, aperture_mm: float | None
         res.usable = True
         return res
     with np.errstate(divide="ignore", invalid="ignore"):
-        rate = ds.flux * ds.e_per_unit / ds.exptime[:, None]
+        rate = ds.star_electrons() / ds.exptime[:, None]
         zp = ds.cat[None, :] + 2.5 * np.log10(np.where(rate > 0, rate, np.nan))
     out = res.stars_out
     lin = ds.linear_limit_adu
@@ -749,10 +851,10 @@ def _expected_mag_noise(ds: Dataset) -> np.ndarray:
     n = len(ds.names)
     if ds.e_per_unit is None or not n:
         return np.full(n, np.nan)
-    e = ds.flux * ds.e_per_unit
+    e = ds.star_electrons()
     sky_e = ds.sky * ds.e_per_unit
     npix = math.pi * (ds.aperture_px or 8.0) ** 2
-    raw_per_px = ds.e_per_unit / ds.gain if ds.gain else 1.0
+    raw_per_px = ds.raw_sum_px
     rn2 = (ds.read_noise_e or 0.0) ** 2 * raw_per_px
     with np.errstate(divide="ignore", invalid="ignore"):
         rel = np.sqrt(np.abs(e) + npix * (np.abs(sky_e)[:, None] + rn2)) / e
@@ -834,10 +936,10 @@ def _scintillation(res: NightResult, zp, good, aperture_m: float, elevation_m: f
     order = np.argsort(ds.jd)
     t = ds.exptime[order]
     x = ds.airmass[order]
-    e_flux = ds.flux[order][:, good] * ds.e_per_unit                      # electrons in the aperture
+    e_flux = ds.star_electrons()[order][:, good]                          # electrons in the aperture
     sky_e = ds.sky[order] * ds.e_per_unit                                 # electrons per measured pixel
     npix = math.pi * (ds.aperture_px or 8.0) ** 2
-    raw_per_px = ds.e_per_unit / ds.gain if ds.gain else 1.0              # raw pixels summed per measured pixel
+    raw_per_px = ds.raw_sum_px                                            # raw pixels summed per measured pixel
     rn2 = (ds.read_noise_e or 0.0) ** 2 * raw_per_px
     with np.errstate(divide="ignore", invalid="ignore"):
         var_ph = (e_flux + npix * (sky_e[:, None] + rn2)) / e_flux ** 2  # relative variance per star per frame
@@ -896,6 +998,7 @@ class BandSummary:
     fwhm_imaging_n: int = 0
     fwhm_imaging_last: str = ""
     zp_marginal_only: bool = False                      # the zero point rests on marginal (drifting) nights only
+    zp_scale_inexact_only: bool = False                 # ... on logs whose electron scale is not the real one only
     sky: float = float("nan")
     sky_sigma: float = float("nan")
     sky_n: int = 0
@@ -1115,6 +1218,19 @@ def combine(results: list, replaced: list | None = None, old_profile: dict | Non
             phot = [r for r in phot if not r.marginal]
         elif phot:
             bs.zp_marginal_only = True
+        # an older SHOBS-P log (format 1) leaves the master flat's factor out of its electron scale (~0.4 mag faint
+        # on an OSC): when any night has the real scale, those nights are set aside from the zero point (their
+        # extinction, seeing, sky and C_Y do not depend on the scale and still count)
+        if any(r.ds.scale_exact for r in phot):
+            for r in phot:
+                if not r.ds.scale_exact:
+                    bs.zp_out[f"{r.ds.night} {r.ds.target}"] = (
+                        "its electron scale is not the real one (" + ("an older SHOBS-P log, before 2.3.0"
+                        if r.ds.scale == SCALE_CAMERA else "a lower limit from the sky's noise")
+                        + "): left out of the zero point")
+            phot = [r for r in phot if r.ds.scale_exact]
+        elif phot:
+            bs.zp_scale_inexact_only = True
         zn = _by_night(phot, lambda r: r.zp1, lambda r: r.zp1_sigma)
         if zn:
             keep = clipped([v for _, v, _, _ in zn], [s for _, _, s, _ in zn])
@@ -1232,6 +1348,8 @@ def measured_records(s: Summary, run_key: str | None = None) -> tuple[dict, dict
                 date=max(b.zp_nights), conditions=_nights_word(b.zp_nights), run=run_key,
                 note="at airmass 1; " + ("marginal (drifting) nights only: no clean photometric night yet; "
                                       if b.zp_marginal_only else "photometric nights only; ")
+                     + ("from logs whose electron scale leaves out the flat (older SHOBS-P) or is a lower limit, "
+                        "so it may be too faint; " if b.zp_scale_inexact_only else "")
                      + "catalogued field stars from " + _catalog_words(s, band))
         if math.isfinite(b.k):
             recs["extinction_k"] = sp.record(_rnd(b.k, 3), "mag/airmass", "measured", sigma=_rnd(b.k_sigma, 3),
@@ -1380,9 +1498,12 @@ def night_values(r: NightResult, system_id: str) -> list:
             rows.append({"key": key, "value": float(v), "sigma": sigma if sigma is None or math.isfinite(sigma)
                          else None, "unit": unit, "source": "measured", "channel": r.ds.band,
                          "profile_id": system_id, "date": r.ds.night})
-    if r.photometric:
-        add("bands.zero_point", r.zp1, "mag for 1 e-/s", r.zp1_sigma)
-    add("bands.zero_point_at_x", r.zp_mean, "mag for 1 e-/s")
+    if r.ds.scale_exact:
+        if r.photometric:
+            add("bands.zero_point", r.zp1, "mag for 1 e-/s", r.zp1_sigma)
+        add("bands.zero_point_at_x", r.zp_mean, "mag for 1 e-/s")
+    elif r.photometric:      # an older log's scale (flat left out) or a lower limit: a trend of its own, never mixed
+        add("bands.zero_point_low_scale", r.zp1, "mag for 1 e-/s", r.zp1_sigma)
     add("bands.extinction_k", r.k, "mag/airmass", r.k_sigma)
     add("bands.sky_brightness", r.sky_mag, "mag/arcsec2")
     add("bands.fwhm_imaging" if r.imaging else "bands.fwhm_defocus" if r.defocused else "bands.fwhm_in_focus",
@@ -1404,4 +1525,5 @@ def night_summary(r: NightResult) -> dict:
             "photometric": r.photometric, "marginal": r.marginal, "trend": n(r.trend), "bin_rms": n(r.bin_rms), "fwhm_arcsec": n(r.fwhm_arcsec, 3),
             "defocus": r.defocus_key if r.defocused else "", "sky": n(r.sky_mag, 3), "moon": n(r.moon_illum, 3),
             "cy": n(r.cy, 3), "overhead_s": n(r.overhead_s, 3), "why_not": r.why_not, "frames_are": r.ds.frames_are,
+            "log_version": r.ds.log_version, "electron_scale": r.ds.scale,
             "worst": worst if worst else ("⚠ not photometric" if r.usable and not r.photometric else "")}

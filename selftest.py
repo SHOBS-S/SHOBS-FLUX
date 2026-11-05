@@ -252,6 +252,19 @@ def s3d_onsky():
     hazy = next(r for r in s.nights if r.ds.night == "2026-10-20")
     check("the hazy night is not photometric (and not in the zero point)",
           not hazy.photometric and "2026-10-20" not in b.zp_nights)
+    # SHOBS-P 2.3.0 (format 2) carries its own electrons per unit, flat factor in; an older log (format 1) does not
+    d2, t2 = synth_sky.make_log(n_frames=80, night="2026-10-21", seed=4, flat_factor=1.3)
+    d1, _ = synth_sky.make_log(n_frames=80, night="2026-10-21", seed=4, flat_factor=1.3, format_version=1)
+    r2 = onsky.analyse(onsky.load_dataset(d2, lambda _c: cam), None, 356, 300)
+    r1 = onsky.analyse(onsky.load_dataset(d1, lambda _c: cam), None, 356, 300)
+    check(f"SHOBS-P 2.3.0 log: zero point {r2.zp1:.3f} with the flat in its scale", abs(r2.zp1 - t2["zp1"]) < 0.02,
+          f"true {t2['zp1']}")
+    check(f"older SHOBS-P log: {r1.zp1:.3f}, too faint by the flat and flagged",
+          abs(r1.zp1 - (t2["zp1"] - 2.5 * math.log10(1.3))) < 0.02 and not r1.ds.scale_exact)
+    d3 = dict(d2, format_version=sp.ONSKY_FORMAT_VERSION + 1)
+    p3 = synth_sky.write_log(d3, os.path.join(TMP, "onsky_newer"))
+    _g, b3 = onsky.read_logs([p3])
+    check("a log from a newer SHOBS-P is named so (not 'damaged')", b3 and b3[0][1].startswith(onsky.NEWER_WORDS))
     pid = sp.system_id("14in RC", 2900, ds[0].camera_id)
     doc = onsky.apply_to_profile(s, None, "selftest", "sky-selftest", system_id=pid, cam_id=ds[0].camera_id,
                                  telescope={"name": "14in RC", "aperture_mm": 356, "focal_mm": 2900},
@@ -364,6 +377,26 @@ def s6_data_folder():
         d = os.path.join(REAL_DATA, sub)
         n = len([x for x in os.listdir(d) if x.endswith(".json")]) if os.path.isdir(d) else 0
         say(f"  {sub}: {n} file{'s' if n != 1 else ''}")
+    d = os.path.join(REAL_DATA, "onsky")
+    if os.path.isdir(d):                                 # read only: the format version of each on-sky log
+        import json
+        import shobs_profile as sp
+        vers: dict = {}
+        for x in sorted(os.listdir(d)):
+            if not x.endswith(".json"):
+                continue
+            try:
+                with open(os.path.join(d, x), encoding="utf-8") as fh:
+                    v = json.load(fh).get("format_version")
+            except (OSError, ValueError):
+                v = "unreadable"
+            vers[v] = vers.get(v, 0) + 1
+        words = {1: "format 1 (older SHOBS-P, FLUX folder runs)", 2: "format 2 (SHOBS-P 2.3.0)"}
+        for v, n in sorted(vers.items(), key=lambda kv: str(kv[0])):
+            w = words.get(v, "unreadable" if v == "unreadable" else f"format {v}"
+                          + (" (newer than this FLUX reads: update FLUX)"
+                             if isinstance(v, int) and v > sp.ONSKY_FORMAT_VERSION else ""))
+            say(f"    on-sky logs, {w}: {n}")
 
 
 def main() -> int:

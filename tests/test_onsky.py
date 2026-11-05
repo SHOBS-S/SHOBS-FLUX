@@ -121,7 +121,17 @@ class TestOneNight(TempData):
         r = onsky.analyse(onsky.load_dataset(doc, lookup))
         self.assertFalse(r.usable)
         self.assertIn("calibrated", r.why_not)
+        doc, _ = synth_sky.make_log(format_version=1)
+        doc["setup"]["e_per_adu_header"] = None
+        r = onsky.analyse(onsky.load_dataset(doc, lambda c: None))
+        self.assertFalse(r.usable)
+        self.assertIn("gain", r.why_not)
+        # a 2.3.0 log carries its own scale, so the missing header gain does not stop it
         doc, _ = synth_sky.make_log()
+        doc["setup"]["e_per_adu_header"] = None
+        r = onsky.analyse(onsky.load_dataset(doc, lambda c: None))
+        self.assertTrue(r.usable)
+        doc, _ = synth_sky.make_log(e_source="assumed")
         doc["setup"]["e_per_adu_header"] = None
         r = onsky.analyse(onsky.load_dataset(doc, lambda c: None))
         self.assertFalse(r.usable)

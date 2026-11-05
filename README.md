@@ -74,6 +74,21 @@ own system's numbers instead of guesses.
   before / after split, and the methods and caveats. A **shared copy** leaves out the site (latitude, longitude,
   elevation) and the file locations on your computer.
 
+## New in 0.5.2
+
+- Reads SHOBS-P 2.3.0's on-sky logs (log format 2). 0.5.1 refused them as "cannot be read". FLUX now uses the
+  electrons per image unit that SHOBS-P writes at each star (gain, binning and the master flat's factor in it;
+  rescaled to the camera profile's gain when there is one), so the zero point no longer comes out ~0.4 mag too faint
+  on a color camera.
+- Older SHOBS-P logs (format 1) are still read. Their scale leaves out the flat, so the Sky page says so and leaves
+  their zero point out whenever a 2.3.0 night is there (their extinction, seeing, sky and C_Y still count). In the
+  run history their zero point is a trend of its own, "Zero point, older logs". Older saved nights are judged again
+  once by the 0.5.2 rules.
+- A log written by a newer SHOBS-P than this FLUX can read is named that way ("update SHOBS-FLUX; the file is fine"),
+  never "move or delete them".
+- shobs_profile.py 1.2.0: on-sky logs have a format version of their own (ONSKY_FORMAT_VERSION 2). Copy it into
+  SHOBS-P and SHOBS-SCHED at their next builds.
+
 ## New in 0.5.1
 
 - Sky page: after Run the plots follow the new run; the folder line names the plate solution ("11 of 12

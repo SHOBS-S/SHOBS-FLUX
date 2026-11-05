@@ -244,6 +244,7 @@ def values_for(keys: tuple, profile_ids: list | None = None, limit: int = 2000) 
 VALUE_WORDS = {
     "bands.zero_point": "Zero point at airmass 1",
     "bands.zero_point_at_x": "Zero point at the night's airmass",
+    "bands.zero_point_low_scale": "Zero point, older logs (flat left out: too faint)",
     "bands.extinction_k": "Extinction k",
     "bands.fwhm_in_focus": "Seeing in focus (FWHM)",
     "bands.fwhm_defocus": "Star size defocused (FWHM)",
@@ -634,7 +635,9 @@ def remove_unsaved_folder_runs() -> list[dict]:
 #   check runs     logged without a reason (FLUX 0.1) get one from their stored numbers.
 # A run judged again carries "rules": RULES_VERSION in its summary; raising RULES_VERSION makes it happen again.
 
-RULES_VERSION = "0.5.1"
+RULES_VERSION = "0.5.2"
+# 0.5.2: SHOBS-P 2.3.0 logs (format 2) carry their own electron scale; a zero point from an older log (flat factor
+#        left out, ~0.4 mag too faint on an OSC) is kept as bands.zero_point_low_scale, never in the zero point trend.
 
 
 def _version(text) -> tuple | None:

@@ -1,6 +1,8 @@
 """Synthetic on-sky logs with known truth, for the Sky page's tests and self-test.
 
-make_log() builds one night as SHOBS-P 2.2.19.1 writes it (format "shobs-onsky-log"): a target and catalogued field
+make_log() builds one night as SHOBS-P writes it (format "shobs-onsky-log"; format_version 2 = SHOBS-P 2.3.0 with
+its per-star electrons per unit, 1 = 2.2.19.1–2.2.21 without; flat_factor = the master flat's value at the stars,
+which a version-1 log leaves out of its scale): a target and catalogued field
 stars, frames along an airmass track, fluxes in SHOBS-P's image units (TG at software bin 2: the average of the two
 green pixels in each cell, binned 2 × 2, so one unit = 8 × gain electrons), with photon, sky and read noise,
 scintillation (Osborn et al. 2015, C_Y), extinction, an optional haze ramp, a star with a wrong catalog magnitude, a
@@ -37,8 +39,9 @@ def make_log(night: str = "2026-10-20", target: str = "Test Star", band: str = "
              aperture_mm: float = 356.0, elevation_m: float = 300.0, haze_mag: float = 0.0, cat_error: dict | None = None,
              saturate: int | None = None, variable: int | None = None, flip_after: int | None = None,
              flip_step: float = 0.0, cloud_mag: float = 0.0, focuspos: float = 6400.0, precalibrated: bool = False, seed: int = 1,
-             run_id: str | None = None, written: str | None = None, written_by: str = "SHOBS-P 2.2.19.1",
-             aperture_px: float = 13.0, noise: bool = True, linear_limit: float = 52775.0) -> tuple[dict, dict]:
+             run_id: str | None = None, written: str | None = None, written_by: str | None = None,
+             aperture_px: float = 13.0, noise: bool = True, linear_limit: float = 52775.0,
+             format_version: int = 2, flat_factor: float = 1.0, e_source: str = "EGAIN") -> tuple[dict, dict]:
     """(log document, truth). airmass: (start, end) — a straight track in time. cat_error {star index: mag added to
     its catalog value}. haze_mag: extra extinction rising linearly over the night (0 = clear). saturate: index of a
     star made bright enough to pass the linear limit. variable: index of a star that varies ±0.1 mag."""
@@ -49,7 +52,10 @@ def make_log(night: str = "2026-10-20", target: str = "Test Star", band: str = "
     st["e_per_adu_header"] = gain
     n_color = 1 if mono else (2 if band == "TG" else 4 if band == "CV" else 1)
     per_unit_px = n_color * soft_bin * soft_bin
-    e_per_unit = gain * per_unit_px
+    e_per_unit = gain * per_unit_px * flat_factor        # the real electrons per image unit (flat-divided frames)
+    if written_by is None:
+        written_by = "SHOBS-P 2.3.0" if format_version >= 2 else "SHOBS-P 2.2.19.1"
+    e_log = None if e_source in ("assumed", None) else round(e_per_unit, 4)
     rpp = soft_bin if mono else 2 * soft_bin
     raw_arcsec = 206.264806 * st["pixel_um"] / st["focal_header_mm"]
     px_arcsec = raw_arcsec * rpp
@@ -98,8 +104,12 @@ def make_log(night: str = "2026-10-20", target: str = "Test Star", band: str = "
             stars[names[i]] = {"flux": round(e_obs / e_per_unit, 3),
                                "inst_mag": round(-2.5 * math.log10(max(e_obs / e_per_unit, 1e-9) / exptime), 5),
                                "peak_adu": round(min(peak, 65535.0), 0), "x": 100.0 + 30 * i, "y": 200.0}
+            if format_version >= 2:
+                stars[names[i]]["e_per_unit"] = e_log
         tgt_e = 10 ** (-0.4 * (10.0 - zp1 + k * (x[f] - 1.0) + haze[f])) * exptime
         stars[target] = {"flux": round(tgt_e / e_per_unit, 3), "inst_mag": 0.0, "peak_adu": 20000.0, "x": 1, "y": 1}
+        if format_version >= 2:
+            stars[target]["e_per_unit"] = e_log
         sky_units = sky_e / e_per_unit + (rng.normal(0, 0.01 * sky_e / e_per_unit) if noise else 0.0)
         frames.append({"file": f"Light_{target}_{exptime:g}s_{f + 1:04d}.fit", "jd_mid": round(float(jds[f]), 6),
                        "airmass": round(float(x[f]), 4), "exptime_s": exptime, "focuspos": focuspos,
@@ -110,7 +120,7 @@ def make_log(night: str = "2026-10-20", target: str = "Test Star", band: str = "
     stars_list = [{"name": target, "role": "target", "catalog_mag": None}] + \
         [{"name": n, "role": "comp" if i < 3 else "spare", "catalog_mag": round(float(cat[i]), 3)}
          for i, n in enumerate(names)]
-    doc = {"format": sp.ONSKY_FORMAT, "format_version": 1, "run_id": run_id or f"{night.replace('-', '')}T230000-{seed:04x}",
+    doc = {"format": sp.ONSKY_FORMAT, "format_version": format_version, "run_id": run_id or f"{night.replace('-', '')}T230000-{seed:04x}",
            "written_by": written_by, "written": written or f"{night}T23:59:00-04:00", "night": night,
            "target": target, "mode": "variables", "setup": st, "band": band, "catalog_band": catalog_band,
            "measurement": {"debayer_mode": None if mono else {"TG": "green", "TR": "red", "TB": "blue"}.get(band,
@@ -119,6 +129,10 @@ def make_log(night: str = "2026-10-20", target: str = "Test Star", band: str = "
                            "sky_inner_px": aperture_px + 7, "sky_outer_px": aperture_px + 17,
                            "flux_units": "SHOBS-P image units summed in the aperture, sky subtracted (calibrated frames)"},
            "precalibrated": precalibrated, "stars": stars_list, "frames": frames}
+    if format_version >= 2:
+        doc["measurement"].update({"e_per_unit_median": e_log, "e_per_unit_source": e_source if e_log else "assumed",
+                                   "e_per_unit_note": "" if e_log else "no gain known",
+                                   "flat_applied": flat_factor != 1.0, "camera_bin_mode": None})
     truth = {"zp1": zp1, "k": k, "seeing": seeing, "sky_mag": sky_mag, "cy": cy, "overhead": overhead,
              "px_arcsec": px_arcsec, "e_per_unit": e_per_unit, "aperture_mm": aperture_mm, "elevation_m": elevation_m,
              "names": names, "linear_limit": linear_limit}

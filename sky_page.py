@@ -121,6 +121,9 @@ def log_info(path: str) -> dict:
     read ("why")."""
     try:
         doc = sp.load(path)
+    except sp.NewerFormatError as exc:
+        return {"path": path, "why": f"{onsky.NEWER_WORDS} ({exc}): update SHOBS-FLUX; the file is fine, leave it "
+                                     "where it is", "newer": True}
     except sp.ProfileError as exc:
         return {"path": path, "why": f"it cannot be read: {exc}"}
     return doc_info(doc, path)
@@ -591,10 +594,13 @@ class SkyPage:
             infos.append(got[1])
         self._infos = {p: v for p, v in self._infos.items() if p in set(files)}
         d = sp.onsky_dir(make=False)
-        bad = sum(1 for i in infos if i.get("why"))
+        newer = sum(1 for i in infos if i.get("newer"))
+        bad = sum(1 for i in infos if i.get("why")) - newer
+        why = ", ".join(([f"{newer} written by a newer SHOBS-P: update SHOBS-FLUX to read them"] if newer else [])
+                        + ([f"{bad} cannot be read"] if bad else []))
         if files:
             self.logs_var.set(f"{_plural(len(files), 'on-sky log file')} in {d}"
-                              + (f" ({bad} cannot be read)" if bad else "")
+                              + (f" ({why})" if why else "")
                               + ". SHOBS-P writes one after every reduction; Run learns from every night of the setup.")
         else:
             self.logs_var.set(f"No on-sky log files yet in {d}. SHOBS-P 2.2.19.1 and later write one each time a "
@@ -764,6 +770,12 @@ class SkyPage:
             return
         key = self._setup_key()
         if key is None:
+            newer = sum(1 for i in infos if i.get("newer"))
+            if newer:
+                self._say(f"⚠ {_plural(newer, 'on-sky log')} in {sp.onsky_dir(make=False)} "
+                          f"{'was' if newer == 1 else 'were'} written by a newer SHOBS-P than this SHOBS-FLUX can "
+                          "read. The files are fine: leave them where they are and update SHOBS-FLUX.")
+                return
             self._say(f"⚠ No on-sky logs to learn from yet in {sp.onsky_dir(make=False)}. SHOBS-P 2.2.19.1 and "
                       "later write one after every reduction; or choose Source → A folder of lights.")
             return
@@ -1301,9 +1313,15 @@ def run_lines(res: SkyRun) -> list:
     if s.replaced:
         bits.append(f"{_plural(len(s.replaced), 'older run')} of the same nights replaced (not counted)")
     out.append(("info", "Nights: " + ", ".join(bits) + "."))
-    if res.bad:
-        out.append(("bad", f"✖ {_plural(len(res.bad), 'on-sky log')} could not be read (listed with ✖ in the "
-                           "table): move or delete them, or let SHOBS-P write them again."))
+    newer = [p for p, why in res.bad if str(why).startswith(onsky.NEWER_WORDS)]
+    damaged = len(res.bad) - len(newer)
+    if newer:
+        out.append(("warn", f"⚠ {_plural(len(newer), 'on-sky log')} {'was' if len(newer) == 1 else 'were'} written by "
+                            "a newer SHOBS-P than this SHOBS-FLUX can read, so they were left out. The files are "
+                            "fine: leave them where they are and update SHOBS-FLUX."))
+    if damaged:
+        out.append(("bad", f"✖ {_plural(damaged, 'on-sky log')} could not be read (listed with ✖ in the table). "
+                           "Reducing the night again in SHOBS-P writes a fresh log; the old file can then go."))
     for band, b in sorted(s.bands.items()):
         w = onsky.BAND_WORDS.get(band, band)
         parts = []
@@ -1327,9 +1345,20 @@ def run_lines(res: SkyRun) -> list:
         if math.isfinite(b.cy):
             parts.append(f"C_Y {b.cy:.2f} from {_plural(b.cy_n, 'night')}")
         out.append(("info", f"{w[0].upper() + w[1:]}: the profile would get " + "; ".join(parts) + "."))
+        scale_out = [what for what, why in sorted(b.zp_out.items()) if why.startswith("its electron scale")]
         for what, why in sorted(b.zp_out.items()):
+            if what in scale_out:
+                continue
             kind = "warn" if why.startswith("disagrees") else "info"
             out.append((kind, ("⚠ " if kind == "warn" else "") + f"{what} set aside for the zero point: {why}."))
+        if scale_out:
+            out.append(("info", f"{_plural(len(scale_out), 'night')} left out of the zero point only (their extinction, "
+                                "seeing, sky and C_Y still count): older SHOBS-P logs whose electron scale leaves out "
+                                "the master flat (" + ", ".join(scale_out) + ")."))
+        if b.zp_scale_inexact_only and math.isfinite(b.zp1):
+            out.append(("warn", "⚠ This zero point rests only on logs whose electron scale is not the real one "
+                                "(older SHOBS-P logs leave out the master flat: up to ~0.4 mag too faint on a color "
+                                "camera). Reduce a photometric night again in SHOBS-P 2.3.0 or later before saving it."))
     if math.isfinite(s.overhead_s):
         out.append(("info", f"Overhead per frame {s.overhead_s:.1f} s: the lowest over "
                             f"{_plural(s.overhead_runs, 'night')} ({s.overhead_from}). A delay you set in the capture "

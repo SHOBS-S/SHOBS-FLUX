@@ -31,10 +31,14 @@ import tempfile
 import time
 from datetime import datetime
 
-SHOBS_PROFILE_VERSION = "1.1.0"          # of this file; raise on every change (the apps' tests check it)
+SHOBS_PROFILE_VERSION = "1.2.0"          # of this file; raise on every change (the apps' tests check it)
 # 1.1.0 (FLUX 0.5.1): save_profile works worked-out values out again (rederive) so they never go stale.
+# 1.2.0 (FLUX 0.5.2): on-sky logs have their own format version (ONSKY_FORMAT_VERSION 2, SHOBS-P 2.3.0 #55: per-star
+#        electrons per image unit); a file from a newer app raises NewerFormatError (leave it alone, update the app).
 
-FORMAT_VERSION = 1
+FORMAT_VERSION = 1                       # camera, system and spec profiles
+ONSKY_FORMAT_VERSION = 2                 # on-sky logs: 1 = SHOBS-P 2.2.19.1–2.2.21 and FLUX folder runs,
+                                         # 2 = SHOBS-P 2.3.0 (+ frames[].stars[].e_per_unit, measurement.e_per_unit_*)
 CAMERA_FORMAT = "shobs-camera-profile"
 SYSTEM_FORMAT = "shobs-system-profile"
 SPEC_FORMAT = "shobs-camera-spec"
@@ -52,6 +56,16 @@ NONE_WORDS = frozenset({"", "NONE", "N/A", "NA", "-", "UNKNOWN"})
 
 class ProfileError(Exception):
     """A profile that cannot be read or is not format v1 (the message is a plain sentence)."""
+
+
+class NewerFormatError(ProfileError):
+    """A file written by a NEWER SHOBS app (a format version this copy does not know yet). The file is fine: leave it
+    where it is and update this app."""
+
+
+def reads_version(fmt: str) -> int:
+    """The newest format version of this kind of file that this copy reads."""
+    return ONSKY_FORMAT_VERSION if fmt == ONSKY_FORMAT else FORMAT_VERSION
 
 
 # ---- where things live ---------------------------------------------------------------------------------------------
@@ -209,9 +223,12 @@ def load(path: str) -> dict:
     if fmt not in (CAMERA_FORMAT, SYSTEM_FORMAT, SPEC_FORMAT, ONSKY_FORMAT):
         raise ProfileError(f"it is not a SHOBS profile (format {fmt!r})")
     ver = doc.get("format_version")
-    if not isinstance(ver, int) or isinstance(ver, bool) or ver > FORMAT_VERSION:
-        raise ProfileError(f"it is format version {ver!r}; this program reads version {FORMAT_VERSION} "
-                           "(a newer SHOBS app wrote it: update this one)")
+    top = reads_version(fmt)
+    if not isinstance(ver, int) or isinstance(ver, bool) or ver < 1:
+        raise ProfileError(f"its format version {ver!r} is not a version number")
+    if ver > top:
+        raise NewerFormatError(f"it is format version {ver}; this program reads up to version {top} "
+                               "(a newer SHOBS app wrote it: update this one)")
     return doc
 
 
@@ -222,8 +239,12 @@ def validate(doc: dict) -> list[str]:
     fmt = doc.get("format")
     if fmt not in (CAMERA_FORMAT, SYSTEM_FORMAT, SPEC_FORMAT, ONSKY_FORMAT):
         return [f"format is {fmt!r}, not a SHOBS profile"]
-    if doc.get("format_version") != FORMAT_VERSION or isinstance(doc.get("format_version"), bool):
-        out.append(f"format_version is {doc.get('format_version')!r}, expected {FORMAT_VERSION}")
+    ver = doc.get("format_version")
+    if fmt == ONSKY_FORMAT:
+        if not isinstance(ver, int) or isinstance(ver, bool) or not 1 <= ver <= ONSKY_FORMAT_VERSION:
+            out.append(f"format_version is {ver!r}, expected 1 to {ONSKY_FORMAT_VERSION}")
+    elif ver != FORMAT_VERSION or isinstance(ver, bool):
+        out.append(f"format_version is {ver!r}, expected {FORMAT_VERSION}")
     if fmt in (CAMERA_FORMAT, SYSTEM_FORMAT):
         for key in ("profile_id", "revision", "created", "updated"):
             if key not in doc:
