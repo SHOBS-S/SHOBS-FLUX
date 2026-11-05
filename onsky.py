@@ -99,10 +99,14 @@ NEWER_WORDS = "written by a newer SHOBS-P"     # how a newer-format log is named
 # what the electron scale of a log rests on (Dataset.scale)
 SCALE_LOG = "log"            # format 2: SHOBS-P wrote electrons per unit at each star (gain, binning, flat in)
 SCALE_LOG_LOWER = "log-lower"  # format 2, but from the sky's own noise (no EGAIN): a lower limit (too few electrons)
+SCALE_LOG_LUM = "log-lum"    # format 2, clear (CV) luminance: SHOBS-P's value is the photon-noise equivalent of the
+                             # four flat-divided Bayer pixels (right for noise; ~0.1 mag too few electrons for a ZP)
 SCALE_CAMERA = "camera"      # worked out here from the gain: format 1 (or a format-2 log with no gain): the master
                              # flat's factor is NOT in it, so its zero point can be ~0.4 mag too faint on an OSC
 SCALE_ADU_SUM = "adu-sum"    # a FLUX folder run: sums of raw ADU, one ADU = gain electrons (exact)
 SCALE_EXACT = (SCALE_LOG, SCALE_ADU_SUM)
+SCALE_REASON = {SCALE_CAMERA: "an older SHOBS-P log, before 2.3.0", SCALE_LOG_LOWER: "a lower limit from the sky's noise",
+                SCALE_LOG_LUM: "a clear (CV) luminance scale, ~0.1 mag faint"}
 
 
 # ---- one night as FLUX sees it --------------------------------------------------------------------------------------
@@ -338,8 +342,8 @@ def load_dataset(path_or_doc, cam_lookup=None, path: str = "") -> Dataset:
                       "reduce the night again in SHOBS-P 2.3.0 or later to fix it")
         src = str(meas.get("e_per_unit_source") or "")
         med = _f(meas.get("e_per_unit_median"))
-        if log_version >= 2 and med and med > 0 and src in ("EGAIN", "sky"):
-            log_scale = (src, med)
+        if log_version >= 2 and src in ("EGAIN", "sky"):
+            log_scale = (src, med if med and med > 0 else None)  # no median written: the stars' own (below)
         elif log_version >= 2:
             why = str(meas.get("e_per_unit_note") or "").strip().rstrip(".")
             scale_note = ("SHOBS-P could not write this log's electrons per unit" + (f" ({why})" if why else "")
@@ -382,23 +386,45 @@ def load_dataset(path_or_doc, cam_lookup=None, path: str = "") -> Dataset:
             if e_star is not None:
                 e = _f(m.get("e_per_unit"))
                 e_star[fi, j] = e if e is not None and e > 0 else np.nan
+    if log_scale and log_scale[1] is None:
+        got = e_star[np.isfinite(e_star)] if e_star is not None and e_star.size else np.array([])
+        if got.size:
+            log_scale = (log_scale[0], float(np.median(got)))
+        else:                                             # no scale anywhere in the log: the old way, with its caveat
+            log_scale, e_star = None, None
+            scale_note = ("SHOBS-P wrote no electrons per unit in this log, so it is worked out from the gain alone "
+                          "and leaves out the master flat's factor: the zero point can be up to ~0.4 mag too faint")
     if log_scale:
         src, med = log_scale
         if e_star.size:                                   # a star the log gave no scale for: the frame's median
             e_star = np.where(np.isfinite(e_star), e_star, med)
         hdr = _f(setup.get("e_per_adu_header"))
+        # SHOBS-P's EGAIN in the scale is × camera_bin² when the camera AVERAGED its binned pixels; a camera profile
+        # for that binned setup measured the binned pixel's own e⁻/ADU, so compare like with like
+        bin_mode = str(meas.get("camera_bin_mode") or "").lower()
+        eff_hdr = hdr
+        if hdr and cam_bin > 1 and bin_mode == "averaged":
+            eff_hdr = hdr * cam_bin * cam_bin
+        elif hdr and cam_bin > 1 and bin_mode != "summed":
+            eff_hdr = None                                # not known how the camera binned: no rescale
         fac = 1.0
-        if src == "EGAIN" and nums["gain"] and nums["gain_source"] not in ("header", "none") and hdr:
-            fac = nums["gain"] / hdr                      # SHOBS-P used EGAIN; the camera profile knows better
+        if src == "EGAIN" and nums["gain"] and nums["gain_source"] not in ("header", "none") and eff_hdr:
+            fac = nums["gain"] / eff_hdr                  # SHOBS-P used EGAIN; the camera profile knows better
         e_star = e_star * fac
         e_per_unit = med * fac                            # the sky: the frame's median scale (its flat in it too)
         if src == "EGAIN":
             scale, scale_note = SCALE_LOG, ""
             if fac == 1.0:
-                if hdr:
-                    gain_used, gain_source = hdr, "header"
-                elif not nums["gain"]:
-                    gain_used, gain_source = None, "log"     # only the log's own scale is known
+                if eff_hdr:
+                    gain_used, gain_source = eff_hdr, "header"
+                else:                                     # the log's own scale; the profile's gain not applied to it
+                    gain_used, gain_source = (nums["gain"] or None), "log"
+            if color == "L":
+                scale = SCALE_LOG_LUM
+                scale_note = ("a clear (CV) log: SHOBS-P's electrons per unit for the luminance is a photon-noise "
+                              "figure for four flat-divided color pixels, right for the noise but a few per cent too "
+                              "few electrons, so the zero point is ~0.1 mag too faint; a single color band (TG, TR, "
+                              "TB) has the exact scale")
         else:
             scale = SCALE_LOG_LOWER
             scale_note = ("SHOBS-P worked out this log's electrons per unit from the sky's own noise (no EGAIN in "
@@ -1209,6 +1235,19 @@ def combine(results: list, replaced: list | None = None, old_profile: dict | Non
                 bs.zp_out[f"{r.ds.night} {r.ds.target}"] = ("too short to judge the sky" if r.too_short else
                                                             "not photometric (clouds or haze)")
         phot = [r for r in rs if r.photometric and math.isfinite(r.zp1)]
+        # an older SHOBS-P log (format 1) leaves the master flat's factor out of its electron scale (~0.4 mag faint
+        # on an OSC): when any night has the real scale, those nights are set aside from the zero point (their
+        # extinction, seeing, sky and C_Y do not depend on the scale and still count). This comes BEFORE the
+        # marginal rule: a drifting night with the real scale beats a clean night 0.4 mag off.
+        if any(r.ds.scale_exact for r in phot):
+            for r in phot:
+                if not r.ds.scale_exact:
+                    bs.zp_out[f"{r.ds.night} {r.ds.target}"] = (
+                        "its electron scale is not the real one (" + SCALE_REASON.get(r.ds.scale, "not known")
+                        + "): left out of the zero point")
+            phot = [r for r in phot if r.ds.scale_exact]
+        elif phot:
+            bs.zp_scale_inexact_only = True
         if any(not r.marginal for r in phot):              # a drifting night is set aside when a clean one is there
             for r in phot:
                 if r.marginal:
@@ -1218,19 +1257,6 @@ def combine(results: list, replaced: list | None = None, old_profile: dict | Non
             phot = [r for r in phot if not r.marginal]
         elif phot:
             bs.zp_marginal_only = True
-        # an older SHOBS-P log (format 1) leaves the master flat's factor out of its electron scale (~0.4 mag faint
-        # on an OSC): when any night has the real scale, those nights are set aside from the zero point (their
-        # extinction, seeing, sky and C_Y do not depend on the scale and still count)
-        if any(r.ds.scale_exact for r in phot):
-            for r in phot:
-                if not r.ds.scale_exact:
-                    bs.zp_out[f"{r.ds.night} {r.ds.target}"] = (
-                        "its electron scale is not the real one (" + ("an older SHOBS-P log, before 2.3.0"
-                        if r.ds.scale == SCALE_CAMERA else "a lower limit from the sky's noise")
-                        + "): left out of the zero point")
-            phot = [r for r in phot if r.ds.scale_exact]
-        elif phot:
-            bs.zp_scale_inexact_only = True
         zn = _by_night(phot, lambda r: r.zp1, lambda r: r.zp1_sigma)
         if zn:
             keep = clipped([v for _, v, _, _ in zn], [s for _, _, s, _ in zn])

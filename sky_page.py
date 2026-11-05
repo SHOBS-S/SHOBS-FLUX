@@ -1130,8 +1130,9 @@ class SkyPage:
                 tr.insert("", "end", values=(d.night, d.target, d.band, len(d.jd), _from(d), "", "", "", "", "", "",
                                              "", OLD_RUN), tags=("old",))
         for path, why in res.bad:
+            newer = str(why).startswith(onsky.NEWER_WORDS)
             tr.insert("", "end", values=("", os.path.basename(path), "", "", "", "", "", "", "", "", "", "",
-                                         f"✖ {why}"), tags=("bad",))
+                                         ("⚠ " if newer else "✖ ") + why), tags=("old" if newer else "bad",))
 
     def night_selected(self):
         sel = self.tree.selection()
@@ -1353,12 +1354,15 @@ def run_lines(res: SkyRun) -> list:
             out.append((kind, ("⚠ " if kind == "warn" else "") + f"{what} set aside for the zero point: {why}."))
         if scale_out:
             out.append(("info", f"{_plural(len(scale_out), 'night')} left out of the zero point only (their extinction, "
-                                "seeing, sky and C_Y still count): older SHOBS-P logs whose electron scale leaves out "
-                                "the master flat (" + ", ".join(scale_out) + ")."))
+                                "seeing, sky and C_Y still count): logs whose electron scale is not the real one, "
+                                "mostly older SHOBS-P logs that leave out the master flat (" + ", ".join(scale_out)
+                                + ")."))
         if b.zp_scale_inexact_only and math.isfinite(b.zp1):
             out.append(("warn", "⚠ This zero point rests only on logs whose electron scale is not the real one "
                                 "(older SHOBS-P logs leave out the master flat: up to ~0.4 mag too faint on a color "
-                                "camera). Reduce a photometric night again in SHOBS-P 2.3.0 or later before saving it."))
+                                "camera). In the run history these nights are a trend of their own, 'Zero point, "
+                                "older logs'. Reduce a photometric night again in SHOBS-P 2.3.0 or later (one color "
+                                "band) before saving it."))
     if math.isfinite(s.overhead_s):
         out.append(("info", f"Overhead per frame {s.overhead_s:.1f} s: the lowest over "
                             f"{_plural(s.overhead_runs, 'night')} ({s.overhead_from}). A delay you set in the capture "

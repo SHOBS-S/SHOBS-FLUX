@@ -220,3 +220,110 @@ class TestNewerLogWords(TempData):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---- the Fable review's findings (0.5.2) ------------------------------------------------------------------------------
+
+class TestReviewFixes(TempData):
+    def test_averaged_camera_binning_rescales_like_with_like(self):
+        # SHOBS-P's scale holds EGAIN × bin² when the camera averaged its 2×2 pixels; the profile for that binned
+        # setup measured the binned pixel (EGAIN × 4). No rescale must happen when they agree.
+        hdr, cam_bin = 0.25, 2
+        doc, t = synth_sky.make_log(gain=hdr * cam_bin ** 2, flat_factor=FLAT)
+        doc["setup"]["camera_binning"] = cam_bin
+        doc["setup"]["e_per_adu_header"] = hdr
+        doc["measurement"]["camera_bin_mode"] = "averaged"
+        prof = synth_sky.camera_profile(gain=hdr * cam_bin ** 2)
+        ds = onsky.load_dataset(doc, lambda c: prof)
+        r = onsky.analyse(ds, None, 356, 300)
+        self.assertLess(abs(r.zp1 - t["zp1"]), 0.02, r.zp1)
+        # binning mode not known: no rescale, the log's own scale stands
+        doc["measurement"]["camera_bin_mode"] = "unknown"
+        prof2 = synth_sky.camera_profile(gain=9.0)               # a wild profile gain must not be applied
+        r2 = onsky.analyse(onsky.load_dataset(doc, lambda c: prof2), None, 356, 300)
+        self.assertLess(abs(r2.zp1 - t["zp1"]), 0.02, r2.zp1)
+
+    def test_median_missing_uses_the_stars_own(self):
+        doc, t = synth_sky.make_log(flat_factor=FLAT)
+        doc["measurement"]["e_per_unit_median"] = None
+        ds = onsky.load_dataset(doc, lookup)
+        self.assertEqual(ds.scale, onsky.SCALE_LOG)
+        r = onsky.analyse(ds, None, 356, 300)
+        self.assertLess(abs(r.zp1 - t["zp1"]), 0.02)
+
+    def test_no_scale_anywhere_falls_back_with_caveat(self):
+        doc, _ = synth_sky.make_log(flat_factor=FLAT)
+        doc["measurement"]["e_per_unit_median"] = None
+        for fr in doc["frames"]:
+            for m in fr["stars"].values():
+                m["e_per_unit"] = None
+        ds = onsky.load_dataset(doc, lookup)
+        self.assertEqual(ds.scale, onsky.SCALE_CAMERA)
+        self.assertIn("wrote no electrons", ds.scale_note)
+
+    def test_exact_but_marginal_beats_clean_but_inexact(self):
+        drift, t = ds_of(night="2026-10-20", flat_factor=FLAT, seed=1)
+        old, _ = ds_of(night="2026-10-21", flat_factor=FLAT, format_version=1, seed=2, target="Other")
+        r1 = onsky.analyse(drift, None, 356, 300)
+        r2 = onsky.analyse(old, None, 356, 300)
+        self.assertTrue(r1.photometric and r2.photometric)
+        r1.marginal, r1.trend = True, 0.04                   # the 2.3.0 night drifted a little
+        s = onsky.combine([r1, r2])
+        b = s.bands["TG"]
+        self.assertEqual(b.zp_nights, ["2026-10-20"])
+        self.assertLess(abs(b.zp1 - t["zp1"]), 0.02)
+        self.assertFalse(b.zp_scale_inexact_only)
+        self.assertTrue(b.zp_marginal_only)
+
+    def test_sky_source_with_old_logs_only(self):
+        a, _ = ds_of(night="2026-10-20", e_source="sky", seed=1)
+        b_, _ = ds_of(night="2026-10-21", format_version=1, seed=2, target="Other")
+        s = onsky.run_all([a, b_], None, 356, 300)
+        self.assertTrue(s.bands["TG"].zp_scale_inexact_only)
+
+    def test_clear_luminance_is_not_exact_for_the_zero_point(self):
+        ds, _ = ds_of(band="CV")
+        self.assertEqual(ds.scale, onsky.SCALE_LOG_LUM)
+        self.assertFalse(ds.scale_exact)
+        self.assertIsNotNone(ds.e_star)                      # its noise still uses the log's scale
+
+    def test_profile_gain_without_header_egain_is_labelled_log(self):
+        doc, _ = synth_sky.make_log()
+        doc["setup"]["e_per_adu_header"] = None
+        ds = onsky.load_dataset(doc, lookup)
+        self.assertEqual(ds.gain_source, "log")
+
+
+class TestRejudgeMovesOldZeroPoint(TempData):
+    def test_format_1_night_moves_to_its_own_trend(self):
+        import sqlite3
+        from tests import m5_data
+        d = m5_data.make(self.tmp)
+        sid = d["system_id"]
+        before = history.series_points("system", sid, "bands.zero_point", "TG")
+        runs = history.recent_runs(10, kind="onsky")
+        old_path = sorted(r["source"] for r in runs)[0]
+        with open(old_path, encoding="utf-8") as fh:
+            doc = json.load(fh)
+        doc["format_version"] = 1                            # as SHOBS-P 2.2.x wrote it: no scale in it
+        doc["measurement"] = {k: v for k, v in doc["measurement"].items() if not k.startswith("e_per_unit")}
+        for fr in doc["frames"]:
+            for m in fr["stars"].values():
+                m.pop("e_per_unit", None)
+        with open(old_path, "w", encoding="utf-8") as fh:
+            json.dump(doc, fh)
+        con = sqlite3.connect(sp.runs_db_path())
+        con.execute("UPDATE runs SET app = 'SHOBS-FLUX 0.5.1' WHERE kind = 'onsky'")
+        for rid, s in con.execute("SELECT id, summary FROM runs WHERE kind = 'onsky'").fetchall():
+            dd = json.loads(s or "{}")
+            dd.pop("rules", None)
+            con.execute("UPDATE runs SET summary = ? WHERE id = ?", (json.dumps(dd), rid))
+        con.commit()
+        con.close()
+        got = history.rejudge()
+        self.assertGreaterEqual(got["onsky"], 1)
+        after = history.series_points("system", sid, "bands.zero_point", "TG")
+        low = history.series_points("system", sid, "bands.zero_point_low_scale", "TG")
+        self.assertEqual(len(after) + len(low), len(before))
+        self.assertEqual(len(low), 1 if any(p["date"] == doc["night"] for p in before) else 0)
+        self.assertNotIn(doc["night"], {p["date"] for p in after})

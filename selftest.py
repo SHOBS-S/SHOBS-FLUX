@@ -380,7 +380,7 @@ def s6_data_folder():
     d = os.path.join(REAL_DATA, "onsky")
     if os.path.isdir(d):                                 # read only: the format version of each on-sky log
         import json
-        import shobs_profile as sp
+        import shobs_profile as _sp
         vers: dict = {}
         for x in sorted(os.listdir(d)):
             if not x.endswith(".json"):
@@ -395,7 +395,7 @@ def s6_data_folder():
         for v, n in sorted(vers.items(), key=lambda kv: str(kv[0])):
             w = words.get(v, "unreadable" if v == "unreadable" else f"format {v}"
                           + (" (newer than this FLUX reads: update FLUX)"
-                             if isinstance(v, int) and v > sp.ONSKY_FORMAT_VERSION else ""))
+                             if isinstance(v, int) and v > _sp.ONSKY_FORMAT_VERSION else ""))
             say(f"    on-sky logs, {w}: {n}")
 
 

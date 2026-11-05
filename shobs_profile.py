@@ -34,7 +34,8 @@ from datetime import datetime
 SHOBS_PROFILE_VERSION = "1.2.0"          # of this file; raise on every change (the apps' tests check it)
 # 1.1.0 (FLUX 0.5.1): save_profile works worked-out values out again (rederive) so they never go stale.
 # 1.2.0 (FLUX 0.5.2): on-sky logs have their own format version (ONSKY_FORMAT_VERSION 2, SHOBS-P 2.3.0 #55: per-star
-#        electrons per image unit); a file from a newer app raises NewerFormatError (leave it alone, update the app).
+#        electrons per image unit); a file from a newer app raises NewerFormatError (leave it alone, update the app);
+#        a format_version below 1 (nothing writes one) is now refused.
 
 FORMAT_VERSION = 1                       # camera, system and spec profiles
 ONSKY_FORMAT_VERSION = 2                 # on-sky logs: 1 = SHOBS-P 2.2.19.1–2.2.21 and FLUX folder runs,
