@@ -860,6 +860,8 @@ def _fit_linearity(ch: ChannelResult, pts: list, sat_level: float) -> None:
             p.deviation_pct = 100.0 * (p.mean_raw - c - b * p.exptime) / (b * p.exptime)
     # walk up the ladder: the last pair within tolerance before the first one outside it
     ladder = sorted([p for p in pts if p.exptime > 0 and math.isfinite(p.deviation_pct)], key=lambda p: p.signal)
+    # (0.6.1, #3: no stray pair is skipped any more; the first pair outside the band ends the range, so every pair
+    # at or below the limit is within ±LIN_TOL_PCT)
     last_ok, first_bad = None, None
     for p in ladder:
         if p.saturated:
@@ -868,19 +870,19 @@ def _fit_linearity(ch: ChannelResult, pts: list, sat_level: float) -> None:
         if abs(p.deviation_pct) <= LIN_TOL_PCT:
             last_ok = p
         else:
-            # one stray pair (flicker) does not end the linear range when the next one is back in
-            nxt = [q for q in ladder if q.signal > p.signal and not q.saturated]
-            if nxt and abs(nxt[0].deviation_pct) <= LIN_TOL_PCT and p.mean_raw - floor < 0.5 * rng:
-                continue
             first_bad = p
             break
     if last_ok is None:
         return
     lim = last_ok.mean_raw
-    how = "the brightest pair still within ±{:g} %".format(LIN_TOL_PCT)
     if first_bad is not None and not first_bad.saturated and math.isfinite(first_bad.deviation_pct):
         how = (f"the last pair within ±{LIN_TOL_PCT:g} % ({last_ok.mean_raw:,.0f} ADU, {last_ok.deviation_pct:+.2f} %); "
                f"the next, at {first_bad.mean_raw:,.0f} ADU, is off by {first_bad.deviation_pct:+.2f} %")
+        back = [q for q in ladder if q.signal > first_bad.signal and not q.saturated
+                and abs(q.deviation_pct) <= LIN_TOL_PCT]
+        if back:
+            how += (f"; {len(back)} brighter pair{'s' if len(back) > 1 else ''} came back within tolerance, so that "
+                    "pair may be a stray (flicker): repeat that exposure to check")
     elif first_bad is not None and first_bad.saturated:
         how = (f"straight up to the brightest unsaturated pair ({last_ok.mean_raw:,.0f} ADU); the next pair "
                "saturated, so the limit is at least that")
@@ -1104,7 +1106,9 @@ def measured_records(res: BenchResult, run_key: str | None = None) -> tuple[dict
     top = res.saturation_adu if math.isfinite(res.saturation_adu) else 65535.0
     lin = {"curve_adu": curve, "max_deviation_pct": None if not math.isfinite(lead.max_dev_pct) else
            round(lead.max_dev_pct, 3),
-           "measured_to_fraction_of_full_scale": round(max((p[0] for p in curve), default=0.0) / top, 3) if curve else None,
+           # the fraction the max deviation holds to: the linear limit, not the top of the whole curve (0.6.1)
+           "measured_to_fraction_of_full_scale": (round(lead.linear_limit_adu / top, 3)
+                                                  if math.isfinite(lead.linear_limit_adu) else None) if curve else None,
            "source": "measured", "date": d}
     return vals, per, lin
 

@@ -998,7 +998,7 @@ def _write(info, tmp, share, version, pages, new_page, table, tel, cam, mode, tr
         p.bullets([
             "Camera (bench): flat pairs and bias pairs in a central region, per color for a one-shot-color camera. "
             "Gain from the photon transfer curve (variance of the difference of each pair against its level), read "
-            "noise from the bias pairs, full well and the safe linear limit from where the curve bends.",
+            "noise from the bias pairs, full well, and the linear limit: the last flat pair still within ±0.5 % of the straight line (never interpolated past it).",
             "Dark current: from the darks' level against exposure and, independently, from their noise; a rate too "
             "small to measure is given as an upper limit.",
             "Zero point: every catalogued field star (APASS DR9, Gaia DR3 synthetic photometry for z′) measured in "

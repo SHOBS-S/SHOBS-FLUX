@@ -76,6 +76,18 @@ own system's numbers instead of guesses.
   before / after split, and the methods and caveats. A **shared copy** leaves out the site (latitude, longitude,
   elevation) and the file locations on your computer.
 
+## New in 0.6.1
+
+- **Bench linear limit: the last flat pair within ±0.5 % of the straight line** (GitHub #3). Before 0.6.1 FLUX used
+  ±1 % and placed the limit where the curve was worked out to leave that band, past the last pair it had actually
+  measured. Now the limit is a level FLUX has measured as linear, and the first pair outside the band ends the range
+  (no stray pair is skipped; if brighter pairs come back in, the Bench page says so and suggests repeating that
+  exposure). The profile's Linearity line ("within X % up to Y % of full scale") now runs to the linear limit, not
+  to the top of the whole curve.
+- **A profile saved before 0.6.1 keeps its old linear limit until the bench is run again.** Run Bench on the same
+  ladder folder and Save: the new values come in as a new profile revision (Roll back can put the old one back).
+  SHOBS-SCHED reads the new limit from then on.
+
 ## New in 0.6.0
 
 - **Copy for AstroImageJ / EXOTIC / HOPS…** (Profiles page). For the camera or system profile you pick, the values

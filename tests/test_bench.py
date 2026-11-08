@@ -246,3 +246,11 @@ class LinearLimitRule(unittest.TestCase):
         self.assertTrue(ch.linear_is_bound)
         self.assertIn("at least", ch.linear_limit_how)
 
+
+    def test_a_stray_pair_ends_the_range_and_is_named(self):
+        # Fable's case: a pair out by −0.55 % with the next back in used to be skipped as flicker
+        curve = self.JOHN_G[:4] + [(22000.0, -0.55), (26979.4, -0.45), (33000.0, -0.9)]
+        ch = self._channel(curve)
+        self.assertAlmostEqual(ch.linear_limit_adu, 16464.6, delta=60)
+        self.assertLessEqual(ch.max_dev_pct, bench.LIN_TOL_PCT)
+        self.assertIn("may be a stray", ch.linear_limit_how)
