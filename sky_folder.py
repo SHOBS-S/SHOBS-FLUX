@@ -7,9 +7,9 @@ is measured on its raw pixels. Nothing is subtracted from the frames: the sky is
 star, so bias, dark and sky all cancel. A star's flux is the raw ADU of its color inside a fixed circular aperture
 minus the ring's level (log flag flux_is_adu_sum: one unit = one ADU = gain electrons). Its raw peak is the brightest
 single camera pixel of that color in the aperture (ADU as written, bias included), which onsky compares with the
-camera's linear limit. The frame's sky is the clipped mean of the stars' ring levels (onsky.clipped, 3 robust sigma:
-a ring with a faint star in it is left out) minus the bias (from the camera profile, else worked out from the sky
-noise and the gain: approximate). A frame whose sky sits less than SKY_MIN_ADU per camera pixel above the bias (or
+camera's linear limit. The frame's sky is the clipped mean of the stars' ring levels (3 robust sigma, as
+onsky.clipped, never under 0.5 ADU per camera pixel: a ring with a faint star in it is left out) minus the bias
+(from the camera profile, else worked out from the sky noise and the gain: approximate). A frame whose sky sits less than SKY_MIN_ADU per camera pixel above the bias (or
 below it) has a sky that is NOT MEASURABLE: it is written as null, never as a number it is not. Each star's own ring
 level (bias taken off) is written with it too, for the noise terms (onsky: the sky around each star).
 
@@ -648,13 +648,23 @@ def consecutive_runs(n_items: int, cap: int, run_len: int = RUN_FRAMES) -> list[
 
 def frame_sky(skies, bias_px: float, n_sum: int):
     """A frame's sky (ADU per measured pixel above the bias) from its stars' ring levels: their clipped mean
-    (onsky.clipped) minus the bias. (sky, why): sky None with why "not measurable" when it sits less than SKY_MIN_ADU
+    (3 robust sigma as onsky.clipped, the sigma at least 0.5 ADU per camera pixel) minus the bias. (sky, why): sky None with why "not measurable" when it sits less than SKY_MIN_ADU
     per camera pixel above the bias (or below it), None with why "" when there are no rings."""
     v = np.asarray([x for x in skies if x is not None and math.isfinite(x)], dtype=float)
     if not v.size:
         return None, ""
-    keep = onsky.clipped(v)
-    mean = float(np.mean(v[keep])) if keep.any() else float(np.median(v))
+    # 3 robust sigma around the median, as onsky.clipped, but the sigma never below half an ADU per camera pixel:
+    # ring medians come in whole ADU, so five rings at 505 give a robust sigma of 0 and an outlier would stay in
+    floor = 0.5 * max(int(n_sum), 1)
+    keep = np.ones(v.size, bool)
+    for _ in range(5):
+        med = float(np.median(v[keep]))
+        lim = onsky.CLIP_SIGMA * max(onsky.rsigma(v[keep]) if keep.sum() >= 2 else 0.0, floor)
+        new = np.abs(v - med) <= lim
+        if not new.any() or (new == keep).all():
+            break
+        keep = new
+    mean = float(np.mean(v[keep]))
     above = mean - bias_px
     if above < SKY_MIN_ADU * max(int(n_sum), 1):
         return None, "not measurable"

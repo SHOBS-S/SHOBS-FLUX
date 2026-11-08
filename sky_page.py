@@ -151,6 +151,8 @@ def _num(v) -> str:
 
 
 def _fmt(v, nd=3, unit=""):
+    if isinstance(v, str) and v:
+        return v
     if v is None or not isinstance(v, (int, float)) or not math.isfinite(v):
         return "—"
     return f"{v:.{nd}f}{(' ' + unit) if unit else ''}"
@@ -1100,7 +1102,7 @@ class SkyPage:
                 self._say(f"✖ The system profile {pid} exists but cannot be read ({exc}), so it was not replaced. "
                           f"Fix or move {path} first (Profiles page shows why).")
                 return
-        changes = onsky.changes_for(res.summary, old)
+        changes = onsky.changes_for(res.summary, old, header_words(res))
         if not changes:
             self._say("⚠ These nights measured nothing that goes in the system profile.")
             return
@@ -1120,9 +1122,7 @@ class SkyPage:
         focal = focal_of(res.datasets)
         aperture = sp._finite(self.aperture_var.get().strip().replace(",", "") or None)
         telescope = {"name": self.name_var.get().strip(), "aperture_mm": aperture,
-                     "focal_mm": round(focal) if focal else None,
-                     "focal_header": focal_header_of(res.datasets),
-                     "telescop_header": ds.setup.get("telescop_header")}
+                     "focal_mm": round(focal) if focal else None, **header_words(res)}
         cam = camera_of(res)
         doc = onsky.apply_to_profile(s, old, settings.WRITTEN_BY, run_key, keep_user, system_id=pid, cam_id=cam,
                                      telescope=telescope, setup=ds.setup)
@@ -1240,7 +1240,7 @@ class SkyPage:
             return
         old = self.current_profile()
         parents: dict = {}
-        for label, ov, osrc, nv, unit, nd in onsky.changes_for(s, old):
+        for label, ov, osrc, nv, unit, nd in onsky.changes_for(s, old, header_words(self.run_res)):
             group, _sep, what = label.partition(": ")
             if not what:
                 group, what = "Cadence", label
@@ -1308,6 +1308,14 @@ def focal_header_of(datasets) -> float | None:
         if f:
             return f
     return None
+
+
+def header_words(res) -> dict:
+    """{"focal_header", "telescop_header"} the run's newest night's headers give (what Save refreshes)."""
+    if res is None or not res.datasets:
+        return {}
+    ds = max(res.datasets, key=lambda d: (d.night, d.written))
+    return {"focal_header": focal_header_of(res.datasets), "telescop_header": ds.setup.get("telescop_header")}
 
 
 def camera_of(res: SkyRun) -> str:

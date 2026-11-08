@@ -50,7 +50,7 @@ CREDITS = [
          "Howell, S. B. 2006, Handbook of CCD Astronomy, 2nd ed., Cambridge University Press.", ""),
         ("Star finding and FWHM", "The star detector and the Gaussian FWHM fit follow SHOBS-P's.",
          "Armbrust, J. W., and Shiloh Hill Observatory, SHOBS-P: Shiloh Hill Observatory Photometry, Zenodo, "
-         "doi:10.5281/zenodo.23417064.", "https://github.com/SHOBS-S/SHOBS-P"),
+         "doi:10.5281/zenodo.23417063 (all versions).", "https://github.com/SHOBS-S/SHOBS-P"),
         ("Gaia G → V and R", "Johnson–Cousins V and R of field stars from Gaia G and BP − RP.",
          "Riello, M. et al. 2021, A&A 649, A3.", ""),
         ("Gaia → Sloan", "Sloan g, r, i, z of field stars from Gaia G and BP − RP, then SDSS ugriz to the primed "

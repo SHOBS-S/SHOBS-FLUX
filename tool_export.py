@@ -13,10 +13,16 @@ the star size. One block per program, in that program's own field names and orde
   EXOTIC       its initialization file (inits.json). EXOTIC asks for NO gain, read noise, dark current or saturation
                (none of its keys does); it asks "Image Scale (Ex: 5.21 arcsecs/pixel)" (older files: "Pixel Scale
                (Ex: 5.21 arcsecs/pixel)", read too), "Camera Type (CCD or DSLR)" (its own guide: CCD for a CMOS),
-               "Pixel Binning" and "Demosaic Format" (the Bayer pattern of a color camera).
+               "Pixel Binning", "Demosaic Format" (the Bayer pattern of a color camera) and "Demosaic Output"
+               (the color the system profile measures: TG green, TR red, TB blue; none for a mono camera).
   HOPS         "Camera gain in e/ADU" and "Saturation limit, relatively to the full-well depth" (Photometry, advanced
-               settings), "Star FWHM in arcseconds (approximate)", "Binning (use 2 for coloured cameras)", and
-               "Telescope Name" / "Camera Name" (observer information). HOPS asks for no read noise or dark current.
+               settings; the share is of HOPS's own limit, min(65535, 2^BITPIX − 1) of the file), "Star FWHM in
+               arcseconds (approximate)", "Binning (use 2 for coloured cameras)" (HOPS's own binning of the frames:
+               2 for a color camera, 1 for mono), and "Telescope Name" / "Camera Name" (observer information). HOPS
+               asks for no read noise or dark current.
+
+The plate scale in a system profile is per sensor pixel (the setup's pixel size is XPIXSZ ÷ binning): a binned
+camera's image pixel is binning × that, and the export says "per camera pixel at N×N".
 
 Every value says where it came from (measured / from the header / spec / typed by you / worked out / estimate). A
 value the profile does not have says "not measured yet": never a made-up number."""
@@ -31,8 +37,6 @@ import shobs_profile as sp
 NOT_YET = "not measured yet"
 SOURCE = {"measured": "measured", "header": "from the FITS header", "spec": "manufacturer's spec",
           "user": "typed by you", "derived": "worked out", "estimate": "estimate, not measured yet"}
-COL = 54                                     # where the values start (the field names are padded to it)
-VAL = 10                                     # the values are padded to this, so the sources line up
 WRAP = 110                                   # the notes above the blocks are wrapped at this
 
 
@@ -126,18 +130,26 @@ def values(doc: dict) -> dict:
     put("saturation", sp.camera_value(cam, "saturation_adu")[1])
     bias = _value(sp.camera_value(cam, "bias_level_adu")[1])
     out["bias"] = (bias, "")
-    lin, sat = out["linear"][0], out["saturation"][0]
-    if lin is not None and sat is not None and sat > 0:
-        b = bias or 0.0
-        frac = (lin - b) / (sat - b) if sat > b else lin / sat
-        out["hops_sat"] = (round(frac, 2), f"worked out: linear limit {_num(lin)} ÷ saturation {_num(sat)} ADU"
-                           + (f", bias {_num(b)} ADU taken off both" if bias else ""))
+    # HOPS: its saturation limit is a share of ITS burn limit, min(65535, 2^BITPIX − 1) of the file (not of the
+    # camera's saturation): 65535 for the 16-bit files cameras write
+    lin = out["linear"][0]
+    bits = int(sp._finite(camera.get("file_bits")) or 16)
+    burn = float(min(65535, 2 ** max(bits, 1) - 1))
+    if lin is not None:
+        out["hops_sat"] = (round(min(lin / burn, 1.0), 2), f"worked out: linear limit {_num(lin)} ÷ {_num(burn)}, "
+                           f"HOPS's limit for {bits}-bit files")
     else:
-        out["hops_sat"] = (None, NOT_YET + " (needs the linear limit and the saturation)")
-    # plate scale (raw camera pixels) and star size, from the system profile
+        out["hops_sat"] = (None, NOT_YET + " (needs the linear limit)")
+    b = sp._finite(mode.get("binning")) or 1
+    # plate scale from the system profile: it is per SENSOR pixel (the setup's pixel size is XPIXSZ ÷ binning), so a
+    # binned camera's image pixel is binning × that
     ps = ((sysd or {}).get("plate_scale") or {}).get("raw_arcsec_per_px")
     if _value(ps) is not None:
-        put("scale", ps, "raw camera pixels" + ("" if sysd is doc else f"; system profile {sysd.get('profile_id')}"))
+        rec = dict(ps)
+        rec["value"] = _value(ps) * b
+        put("scale", rec, f"per camera pixel at {int(b)}×{int(b)}" + (f" ({_num(_value(ps))} × {int(b)})"
+                                                                      if b != 1 else "")
+            + ("" if sysd is doc else f"; system profile {sysd.get('profile_id')}"))
     else:
         out["scale"] = (None, NOT_YET + (f" ({missing})" if missing and not sysd else ""))
     fw, fw_band = None, ""
@@ -156,10 +168,18 @@ def values(doc: dict) -> dict:
         put("fwhm", fw, f"seeing in focus, {fw_band}")
     else:
         out["fwhm"] = (None, NOT_YET + (" (from the Sky page's nights)" if sysd else " (needs a system profile)"))
-    b = sp._finite(mode.get("binning")) or 1
     out["binning"] = (int(b), "camera profile")
     bayer = camera.get("bayer_pattern")
     out["bayer"] = (bayer if bayer else None, "camera profile")
+    # EXOTIC's "Demosaic Output": the color the system profile measures (green unless it has only red or blue)
+    bands = set(((sysd or {}).get("bands") or {}))
+    color = None
+    if bayer:
+        color = next((c for k, c in (("TG", "green"), ("TR", "red"), ("TB", "blue")) if k in bands), "green")
+        out["demosaic"] = (color, "the band of the system profile" if bands & {"TG", "TR", "TB"} else
+                           "EXOTIC's default (green)")
+    else:
+        out["demosaic"] = (None, "")
     out["camera_name"] = (camera.get("instrume") or None, "camera profile")
     out["telescope_name"] = (((sysd or {}).get("telescope") or {}).get("name") or None,
                              "system profile" if sysd else "")
@@ -181,20 +201,15 @@ def values(doc: dict) -> dict:
     return out
 
 
-def _line(name: str, val, src: str, fmt=None) -> str:
-    """One field: its name, the value (or "not measured yet ...") and where the value came from."""
-    pad = " " * max(COL - len(name), 2)
-    if val is None:
-        return f"  {name}{pad}{src or NOT_YET}"
-    shown = fmt(val) if fmt else _num(val) if isinstance(val, (int, float)) else str(val)
-    return f"  {name}{pad}{shown:<{VAL}}  {src}".rstrip()
+def _shown(val, fmt=None) -> str:
+    return fmt(val) if fmt else _num(val) if isinstance(val, (int, float)) else str(val)
 
 
 def text(doc: dict) -> str:
     """The whole export as plain text (what Copy puts on the clipboard and Save writes)."""
+    import textwrap
     v = values(doc)
     g, rn, dk, lin, sat, sc = (v[k] for k in ("gain", "read_noise", "dark", "linear", "saturation", "scale"))
-    import textwrap
     L = [f"{settings.APP_NAME} {settings.APP_VERSION}: values for AstroImageJ, EXOTIC and HOPS",
          f"Written {sp.now_iso()[:16].replace('T', ' ')}."]
     notes = list(v["_about"])
@@ -206,39 +221,56 @@ def text(doc: dict) -> str:
                      f"take {_num(v['bias'][0])} off them.")
     for n in notes:
         L += textwrap.wrap(n, WRAP) or [""]
-    L.append("")
-    L.append("AstroImageJ: Aperture Photometry Settings (Multi-Aperture)")
-    L.append(_line("CCD gain [e-/count]", g[0], g[1]))
-    L.append(_line("CCD readout noise [e-]", rn[0], rn[1]))
-    L.append(_line("CCD dark current per sec [e-/pix/sec]", dk[0], dk[1]))
-    L.append(_line("Saturation warning: for levels higher than", sat[0], sat[1]))
-    L.append(_line("Linearity warning: for levels higher than", lin[0], lin[1]))
-    L.append(_line("Pixel scale (arcsec/pixel)*", sc[0], sc[1], fmt=lambda x: _num(x, 3)))
-    L.append("  * not an AstroImageJ field: it takes the pixel scale from the plate solution.")
-    L.append("")
-    L.append("EXOTIC: initialization file (inits.json)")
-    L.append(_line('"Image Scale (Ex: 5.21 arcsecs/pixel)"', sc[0], sc[1], fmt=lambda x: _num(x, 3)))
-    L.append(_line('"Camera Type (CCD or DSLR)"', "CCD", "EXOTIC's guide: CCD for a CMOS camera too (say CMOS in "
-                                                        "\"Observing Notes\")"))
+    s3 = lambda x: _num(x, 3)                                  # noqa: E731
     b = v["binning"][0]
-    L.append(_line('"Pixel Binning"', f"{b}x{b}", v["binning"][1]))
-    L.append(_line('"Demosaic Format"', v["bayer"][0] or "null", "Bayer pattern, camera profile" if v["bayer"][0]
-                   else "mono camera: no color processing"))
-    L.append("  EXOTIC asks for no gain, read noise, dark current or saturation. Older init files call the scale "
-             "\"Pixel Scale (Ex: 5.21 arcsecs/pixel)\"; EXOTIC reads either.")
-    L.append("")
-    L.append("HOPS")
-    L.append(_line("Camera gain in e/ADU", g[0], g[1]))
-    hs = v["hops_sat"]
-    L.append(_line("Saturation limit, relatively to the full-well depth", hs[0], hs[1],
-                   fmt=lambda x: _num(x, 2)))
-    fw = v["fwhm"]
-    L.append(_line("Star FWHM in arcseconds (approximate)", fw[0], fw[1], fmt=lambda x: _num(x, 1)))
-    L.append(_line("Binning (use 2 for coloured cameras)", b, v["binning"][1] + (
-        "; HOPS's own advice is 2 for a color camera" if v["bayer"][0] else "")))
-    L.append(_line("Telescope Name", v["telescope_name"][0], v["telescope_name"][1]))
-    L.append(_line("Camera Name", v["camera_name"][0], v["camera_name"][1]))
-    L.append("  HOPS asks for no read noise or dark current.")
+    osc = bool(v["bayer"][0])
+    hb = 2 if osc else 1
+    name_words = lambda pair, what: (pair[0], pair[1]) if pair[0] else (None, f"not set ({what})")   # noqa: E731
+    rows = [None, "AstroImageJ: Aperture Photometry Settings (Multi-Aperture)",
+            ("CCD gain [e-/count]", g[0], g[1], None),
+            ("CCD readout noise [e-]", rn[0], rn[1], None),
+            ("CCD dark current per sec [e-/pix/sec]", dk[0], dk[1], None),
+            ("Saturation warning: for levels higher than", sat[0], sat[1], None),
+            ("Linearity warning: for levels higher than", lin[0], lin[1], None),
+            ("Pixel scale (arcsec/pixel)*", sc[0], sc[1], s3),
+            "  * not an AstroImageJ field: it takes the pixel scale from the plate solution.",
+            None, "EXOTIC: initialization file (inits.json)",
+            ('"Image Scale (Ex: 5.21 arcsecs/pixel)"', sc[0], sc[1], s3),
+            ('"Camera Type (CCD or DSLR)"', "CCD", "EXOTIC's guide: CCD for a CMOS camera too (say CMOS in "
+                                                   "\"Observing Notes\")", None),
+            ('"Pixel Binning"', f"{b}x{b}", v["binning"][1], None),
+            ('"Demosaic Format"', v["bayer"][0] or "null", "Bayer pattern, camera profile" if osc
+             else "mono camera: no color processing", None)]
+    if osc:
+        rows.append(('"Demosaic Output"', v["demosaic"][0], v["demosaic"][1], None))
+    rows += ["  EXOTIC asks for no gain, read noise, dark current or saturation. Older init files call the scale "
+             "\"Pixel Scale (Ex: 5.21 arcsecs/pixel)\"; EXOTIC reads either.",
+             None, "HOPS",
+             ("Camera gain in e/ADU", g[0], g[1], None),
+             ("Saturation limit, relatively to the full-well depth", *v["hops_sat"], lambda x: _num(x, 2)),
+             ("Star FWHM in arcseconds (approximate)", *v["fwhm"], lambda x: _num(x, 1)),
+             ("Binning (use 2 for coloured cameras)", hb, "HOPS's binning of the frames: " +
+              ("2 for a color camera, as HOPS advises" if osc else "1 for a mono camera") +
+              " (HOPS scales its saturation limit by it itself)", None),
+             ("Telescope Name", *name_words(v["telescope_name"], "a camera profile has no telescope"
+                                            if doc.get("format") == sp.CAMERA_FORMAT else "type it on the Sky page"),
+              None),
+             ("Camera Name", *name_words(v["camera_name"], "no INSTRUME in the camera profile"), None),
+             "  HOPS asks for no read noise or dark current."]
+    fields = [r for r in rows if isinstance(r, tuple)]
+    col = max(len(r[0]) for r in fields) + 3
+    val = max(len(_shown(r[1], r[3])) for r in fields if r[1] is not None) + 3
+    for r in rows:
+        if r is None:
+            L.append("")
+        elif isinstance(r, str):
+            L.append(r)
+        else:
+            name, value, src, fmt = r
+            if value is None:
+                L.append(f"  {name:<{col}}{src or NOT_YET}")
+            else:
+                L.append(f"  {name:<{col}}{_shown(value, fmt):<{val}}{src}".rstrip())
     return "\n".join(L) + "\n"
 
 

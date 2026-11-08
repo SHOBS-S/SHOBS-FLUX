@@ -85,10 +85,64 @@ class TestToolExport(TempData):
         # HOPS
         self.assertTrue(field(t, "Camera gain in e/ADU").startswith("0.2429"))
         self.assertTrue(field(t, "Saturation limit, relatively to the full-well depth").startswith("0.49"))
+        self.assertIn("÷ 65535, HOPS's limit for 16-bit files", t)
+        self.assertTrue(field(t, "Binning (use 2 for coloured cameras)").startswith("2 "))   # OSC
+        self.assertIn("HOPS's binning of the frames", t)
+        self.assertTrue(field(t, '"Demosaic Output"').startswith("green"))
         self.assertTrue(field(t, "Telescope Name").startswith("14in RC"))
         self.assertTrue(field(t, "Camera Name").startswith("ZWO ASI2600MC Air"))
         self.assertIn("HOPS asks for no read noise", t)
         self.assertIn(f"SHOBS-FLUX {__import__('settings').APP_VERSION}", t)
+
+    def test_bin2_plate_scale_is_the_binned_pixel(self):
+        """Fable 0.6.0 #1: the profile's scale is per sensor pixel; a bin-2 camera's pixel is twice it."""
+        import tool_export
+        cam, sysd = fixtures_in()
+        cam["mode"]["binning"] = 2
+        cid = cam["profile_id"].replace("__bin1", "__bin2")
+        cam["profile_id"] = cid
+        sp.save_profile(cam, "test")
+        sysd = dict(sysd, camera_profile=cid, profile_id=sysd["profile_id"].replace("__bin1", "__bin2"))
+        sp.save_profile(sysd, "test")
+        t = tool_export.text(sysd)
+        self.assertTrue(field(t, '"Image Scale (Ex: 5.21 arcsecs/pixel)"').startswith("0.534"), t)
+        self.assertIn("per camera pixel at 2×2 (0.267 × 2)", t)
+        self.assertTrue(field(t, '"Pixel Binning"').startswith("2x2"))
+
+    def test_mono_camera_blocks(self):
+        """Fable 0.6.0 #3, #4: a mono camera: no Demosaic Output, Demosaic Format null, HOPS binning 1."""
+        import tool_export
+        cam, sysd = fixtures_in()
+        cam["camera"]["bayer_pattern"] = None
+        cam["camera"]["color"] = "mono"
+        sp.save_profile(cam, "test")
+        t = tool_export.text(sysd)
+        self.assertTrue(field(t, '"Demosaic Format"').startswith("null"))
+        self.assertNotIn('"Demosaic Output"', t)
+        self.assertTrue(field(t, "Binning (use 2 for coloured cameras)").startswith("1 "))
+        self.assertIn("1 for a mono camera", t)
+
+    def test_names_not_set_and_columns_line_up(self):
+        """Fable 0.6.0 #11: a missing name says "not set"; every value starts in the same column."""
+        import tool_export
+        cam, _sysd = fixtures_in()
+        for p in sp.list_profiles("systems"):
+            os.remove(p)
+        t = tool_export.text(sp.load(sp.list_profiles("cameras")[0]))
+        self.assertTrue(field(t, "Telescope Name").startswith("not set"))
+        starts = set()
+        for line in t.splitlines():
+            for name in ("CCD gain [e-/count]", "Camera Name", "Camera gain in e/ADU", '"Pixel Binning"'):
+                if line.strip().startswith(name):
+                    starts.add(len(line) - len(line[2 + len(name):].lstrip()))
+        self.assertEqual(len(starts), 1, starts)
+        srcs = set()
+        for line in t.splitlines():
+            for name, value in (("Camera Name", "ZWO ASI2600MC Air"), ('"Pixel Binning"', "1x1")):
+                if line.strip().startswith(name):
+                    srcs.add(line.index(value) + len(value) + len(line[line.index(value) + len(value):])
+                             - len(line[line.index(value) + len(value):].lstrip()))
+        self.assertEqual(len(srcs), 1, srcs)
 
     def test_missing_values_are_not_measured_yet(self):
         import tool_export
@@ -147,6 +201,10 @@ class TestToolExport(TempData):
             app.update()
             self.assertTrue(page.msg_var.get().startswith("✔ Copied"), page.msg_var.get())
             self.assertIn("CCD gain [e-/count]", app.clipboard_get())
+            first = page.export_dialog
+            page.copy_for_tools()                                       # Fable 0.6.0 #9: one window at a time
+            app.update()
+            self.assertFalse(first.winfo_exists())
             dlg = page.export_dialog
             out = self.path("export.txt")
             self.assertTrue(dlg.save_as(out))
@@ -269,6 +327,12 @@ class TestFocalHeaderFresh(TempData):
         self.assertEqual(doc2["telescope"]["focal_header"], 2906.0)      # was stuck at 2898 before 0.6.0
         self.assertEqual(doc2["telescope"]["telescop_header"], "iOptron CEM120")
         self.assertEqual(doc2["telescope"]["focal_mm"], 2903)            # the id's focal length stays
+        # Fable 0.6.0 #12: the Save preview lists the header's change
+        ch = onsky.changes_for(s2, doc, tel2)
+        self.assertIn(("Telescope: Focal length in the header", 2898.0, "header", 2906.0, "mm", 0), ch)
+        self.assertTrue(any(c[0] == "Telescope: TELESCOP in the header" and c[3] == "iOptron CEM120" for c in ch))
+        self.assertFalse(any(c[0].startswith("Telescope:") for c in onsky.changes_for(s2, doc2, tel2)))
+        self.assertFalse(any(c[0].startswith("Telescope:") for c in onsky.changes_for(s2, None, tel2)))
         doc3 = onsky.apply_to_profile(s2, doc2, "test", system_id=pid, cam_id=CAM,
                                       telescope=dict(tel2, focal_header=None, telescop_header=None))
         self.assertEqual(doc3["telescope"]["focal_header"], 2906.0)      # no header: nothing is wiped
@@ -361,6 +425,9 @@ class TestFolderSky(TempData):
         sky, why = sky_folder.frame_sky(rings, 500.0, 2)
         self.assertEqual(why, "")
         self.assertAlmostEqual(sky, 100.0, places=6)                     # mean of the five, the 900 clipped
+        # Fable 0.6.0 #5: whole-ADU ring medians (robust sigma 0) still clip an outlier
+        tied, _w = sky_folder.frame_sky([505, 505, 505, 505, 506, 505, 540], 500.0, 1)
+        self.assertAlmostEqual(tied, 5.1667, places=3)
         self.assertEqual(sky_folder.frame_sky(rings + [float("nan"), None], 500.0, 2)[0], sky)
         # less than SKY_MIN_ADU per camera pixel above the bias (2 pixels summed here): not measurable
         near = [508.0, 509.0, 508.5]
@@ -477,6 +544,7 @@ class TestStarLocalSky(TempData):
 
     def test_star_rings_win_and_zero_point_is_untouched(self):
         doc, truth, _fac = self._log()
+        doc["measurement"]["flux_is_adu_sum"] = True          # a FLUX folder run's log: its rings are read
         cam = synth_sky.camera_profile()
         base = onsky.analyse(onsky.load_dataset(doc, cam_lookup=lambda c: cam), aperture_mm=356, elevation_m=300)
         rings = copy.deepcopy(doc)
@@ -485,7 +553,7 @@ class TestStarLocalSky(TempData):
                 m["sky"] = round(f["sky"] * 3.0, 3)                     # a much brighter sky around every star
         ds2 = onsky.load_dataset(rings, cam_lookup=lambda c: cam)
         self.assertIsNotNone(ds2.star_sky)
-        np.testing.assert_allclose(ds2.noise_sky_e()[:, 0], 3.0 * ds2.sky * ds2.e_star[:, 0], rtol=1e-3)
+        np.testing.assert_allclose(ds2.noise_sky_e()[:, 0], 3.0 * ds2.sky * ds2.star_e()[:, 0], rtol=1e-3)
         r2 = onsky.analyse(ds2, aperture_mm=356, elevation_m=300)
         self.assertEqual(r2.zp1, base.zp1)                                # the zero point does not use it
         self.assertEqual(r2.sky_mag, base.sky_mag)                        # nor the sky brightness
@@ -493,18 +561,41 @@ class TestStarLocalSky(TempData):
         exp_ring = onsky._expected_mag_noise(ds2)
         self.assertTrue(np.all(exp_ring[np.isfinite(exp_ring)] > exp_base[np.isfinite(exp_base)]))
 
-    def test_not_measurable_sky_counts_as_none(self):
+    def test_unknown_sky_is_left_out_not_zero(self):
+        """Fable 0.6.0 #7: a null sky is NaN in the noise terms (left out of the medians), never 0 e⁻."""
+        doc, _t, _f = self._log()
+        for i, f in enumerate(doc["frames"]):
+            if i % 2:
+                f["sky"] = None
+        ds = onsky.load_dataset(doc, cam_lookup=lambda c: synth_sky.camera_profile())
+        sky_e = ds.noise_sky_e()
+        self.assertTrue(np.all(np.isnan(sky_e[1::2])))
+        self.assertTrue(np.all(np.isfinite(sky_e[0::2])))
+        self.assertTrue(np.all(np.isfinite(onsky._expected_mag_noise(ds))))
+
+    def test_star_rings_only_from_flux_folder_logs(self):
+        """Fable 0.6.0 #6: a per-star "sky" in a SHOBS-P log (other units, some day) is not used."""
         doc, _t, _f = self._log()
         for f in doc["frames"]:
-            f["sky"] = None
+            for m in f["stars"].values():
+                m["sky"] = 999.0
         ds = onsky.load_dataset(doc, cam_lookup=lambda c: synth_sky.camera_profile())
-        self.assertTrue(np.all(ds.noise_sky_e() == 0.0))
-        self.assertTrue(np.all(np.isfinite(onsky._expected_mag_noise(ds))))
+        self.assertIsNone(ds.star_sky)
+        doc["measurement"]["flux_is_adu_sum"] = True
+        self.assertIsNotNone(onsky.load_dataset(doc, cam_lookup=lambda c: synth_sky.camera_profile()).star_sky)
 
 
 # ---- 15 --------------------------------------------------------------------------------------------------------------
 
 class TestStarNames(TempData):
+    def test_digit_hyphens_count(self):
+        """Fable 0.6.0 #8: a separator between two digits is part of the name."""
+        self.assertFalse(onsky.same_name("TYC 123-4567-1", "TYC 1234-567-1"))
+        self.assertTrue(onsky.same_name("TYC 123-4567-1", "TYC 123 4567 1"))
+        self.assertTrue(onsky.same_name("GSC 02652-01324", "GSC 02652 01324"))
+        self.assertFalse(onsky.same_name("GSC 02652-01324", "GSC 0265-201324"))
+        self.assertTrue(onsky.same_name("HD219134", "HD 219134") and onsky.same_name("HD 219134", "hd-219134"))
+
     def test_name_key(self):
         for a, b in (("HD219134", "HD 219134"), ("hd 219134", "HD219134"), ("HD-219134", "HD_219134"),
                      ("WASP 12", "WASP-12"), ("HAT-P-32", "HAT P 32")):
@@ -560,6 +651,20 @@ class TestStarNames(TempData):
         finally:
             history.series_points = real
         self.assertEqual(len(info["nights"]), 1)
+
+
+class TestCitation(unittest.TestCase):
+    def test_shobs_p_concept_doi(self):
+        """SHOBS-P is cited by its concept DOI (every version), not the v2.2.16 record."""
+        import credits
+        text = credits.credits_text()
+        self.assertIn("10.5281/zenodo.23417063", text)
+        self.assertNotIn("23417064", text)
+        here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        for name in os.listdir(here):
+            if name.endswith((".py", ".md", ".cff")):
+                with open(os.path.join(here, name), encoding="utf-8") as fh:
+                    self.assertNotIn("23417064", fh.read(), name)
 
 
 if __name__ == "__main__":

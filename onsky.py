@@ -113,10 +113,14 @@ SCALE_REASON = {SCALE_CAMERA: "an older SHOBS-P log, before 2.3.0", SCALE_LOG_LO
 # ---- star names ------------------------------------------------------------------------------------------------------
 
 def name_key(name) -> str:
-    """A star's name as FLUX compares it (0.6.0): case, spaces, underscores and hyphens do not count, so "HD219134",
-    "HD 219134" and "hd-219134" are one star (SHOBS-P, the capture program's OBJECT and the catalogs spell catalog
-    names differently). Signs and points still count ("BD+39 4529", "TOI 1234.01"). Shown names are never changed."""
-    return re.sub(r"[\s_\-]+", "", str(name or "")).casefold()
+    """A star's name as FLUX compares it (0.6.0): case does not count, nor a space, underscore or hyphen next to a
+    letter, so "HD219134", "HD 219134" and "hd-219134" are one star (SHOBS-P, the capture program's OBJECT and the
+    catalogs spell catalog names differently). Between two digits a separator counts (any of them, as one): "TYC
+    123-4567-1" and "TYC 1234-567-1" stay two stars, "GSC 02652-01324" = "GSC 02652 01324". Signs and points count
+    ("BD+39 4529", "TOI 1234.01"). Shown names are never changed."""
+    t = str(name or "").strip()
+    t = re.sub(r"(?<!\d)[\s_\-]+|[\s_\-]+(?!\d)", "", t)    # a separator next to a letter does not count
+    return re.sub(r"[\s_\-]+", "-", t).casefold()          # between two digits it does: TYC 123-4567-1 ≠ 1234-567-1
 
 
 def same_name(a, b) -> bool:
@@ -194,15 +198,16 @@ class Dataset:
         """Frames × stars: the sky's electrons per measured pixel AROUND EACH STAR, for the noise terms (0.6.0): the
         star's own ring level when the log has it (a FLUX folder run), else the frame's sky, times the electrons per
         unit AT that star (SHOBS-P 2.3.0 logs: the master flat's factor there, which moves ±8 % across a field) instead
-        of the frame's median. A sky that is not measurable (null: too close to the bias) counts as none. The zero
-        point does not use this."""
+        of the frame's median. Where no sky is known (null) it is NaN, so that frame is left out of the noise medians; a
+        FLUX folder run's "not measurable" frame still has each star's ring (0 or more). The zero point does not use
+        this."""
         e = self.star_e()
         if e is None:
             return None
         sky = np.broadcast_to(self.sky[:, None], self.flux.shape).astype(float)
         if self.star_sky is not None and self.star_sky.shape == sky.shape:
             sky = np.where(np.isfinite(self.star_sky), self.star_sky, sky)
-        sky = np.where(np.isfinite(sky), np.abs(sky), 0.0)
+        sky = np.abs(sky)                       # no sky known (null): NaN, left out of the medians as before 0.6.0
         return sky * np.where(np.isfinite(e), e, self.e_per_unit if self.e_per_unit else np.nan)
 
     @property
@@ -421,8 +426,9 @@ def load_dataset(path_or_doc, cam_lookup=None, path: str = "") -> Dataset:
             flux[fi, j] = v if v is not None else np.nan
             p = _f(m.get("peak_adu"))
             peak[fi, j] = p if p is not None else np.nan
-            q = _f(m.get("sky"))
-            star_sky[fi, j] = q if q is not None else np.nan
+            if meas.get("flux_is_adu_sum"):        # only FLUX's own folder runs write a star's ring, in its units
+                q = _f(m.get("sky"))
+                star_sky[fi, j] = q if q is not None else np.nan
             if e_star is not None:
                 e = _f(m.get("e_per_unit"))
                 e_star[fi, j] = e if e is not None and e > 0 else np.nan
@@ -1476,10 +1482,19 @@ LABELS = {"zero_point": ("Zero point", "mag (1 e⁻/s)", 3), "extinction_k": ("E
           "overhead_s": ("Overhead per frame", "s", 2)}
 
 
-def changes_for(s: Summary, doc: dict | None) -> list:
-    """[(label, old value, old source, new value, unit, decimals)] for the save dialog."""
+def changes_for(s: Summary, doc: dict | None, telescope: dict | None = None) -> list:
+    """[(label, old value, old source, new value, unit, decimals)] for the save dialog. telescope: what the nights'
+    headers say ({"focal_header", "telescop_header"}); a change there is listed too (apply_to_profile refreshes it)."""
     bands, cad = measured_records(s)
     out = []
+    old_t = (doc or {}).get("telescope") or {}
+    if doc is not None and telescope:
+        f_new, f_old = sp._finite(telescope.get("focal_header")), sp._finite(old_t.get("focal_header"))
+        if f_new is not None and f_new != f_old:
+            out.append(("Telescope: Focal length in the header", f_old, "header", f_new, "mm", 0))
+        t_new = telescope.get("telescop_header")
+        if t_new and t_new != old_t.get("telescop_header"):
+            out.append(("Telescope: TELESCOP in the header", old_t.get("telescop_header"), "header", t_new, "", 0))
     for band, recs in bands.items():
         old_b = (((doc or {}).get("bands") or {}).get(band) or {})
         for key, r in recs.items():

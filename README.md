@@ -82,15 +82,16 @@ own system's numbers instead of guesses.
   those programs ask for, one block per program in its own field names and order: AstroImageJ's Aperture Photometry
   Settings ("CCD gain", "CCD readout noise", "CCD dark current per sec", the saturation and linearity warning
   levels), EXOTIC's initialization file ("Image Scale (Ex: 5.21 arcsecs/pixel)", camera type, binning, Bayer
-  pattern: EXOTIC asks for no gain, read noise or dark current) and HOPS ("Camera gain in e/ADU", the saturation
-  limit as a share of full well, the star FWHM, binning, telescope and camera names). The dark current is read at the
+  pattern and demosaic color: EXOTIC asks for no gain, read noise or dark current) and HOPS ("Camera gain in e/ADU",
+  the saturation limit as a share of HOPS's 65,535 limit for 16-bit files, the star FWHM, HOPS's own binning (2 for a
+  color camera), telescope and camera names). The plate scale is that of the camera's (binned) pixel. The dark current is read at the
   profile's sensor temperature. Every value says where it came from (measured, header, spec, typed by you, worked
   out, estimate); a value the profile does not have says "not measured yet". It goes to the clipboard, and **Save as
   .txt…** keeps a copy.
 - Sky page: the nights table's headings are never cut off (at 100 %, 125 % or 150 % Windows scaling), and each
   heading says what its column means when you hold the pointer on it.
-- A system profile's "Focal length in the header" (and TELESCOP) now follows the newest night saved into it; before,
-  it kept the first run's for ever. A folder of lights takes the median FOCALLEN of its lights, not the first one's.
+- A system profile's "Focal length in the header" (and TELESCOP) now follows the newest night saved into it (the
+  Save window lists the change); before, it kept the first run's for ever. A folder of lights takes the median FOCALLEN of its lights, not the first one's.
 - History: a saved Sky run names the on-sky log and night it saved ("…\onsky\2026-10-22__hd-219134__….json and 3
   more logs · 4 nights, 2026-10-19 to 2026-10-22"), not only the onsky folder. Runs saved by 0.5 name the nights
   recorded with them.
@@ -98,15 +99,17 @@ own system's numbers instead of guesses.
 - Folder of lights: the frame's sky is the clipped mean of the rings around the stars (the same 3-sigma clipping as
   the rest of the Sky page). A sky less than 5 ADU per camera pixel above the bias is too close to it to tell: the
   frame's sky is "not measurable" (the Findings say so), never a number it is not.
-- The noise terms (which stars are only too faint to help, and scintillation) use the sky around each star and
-  SHOBS-P's electrons per unit at that star, not the frame's median (the master flat moves it ±8 % across a field).
-  The zero point is not changed by this.
+- The noise terms (which stars are only too faint to help, and scintillation) use the sky around each star (a
+  folder run's own ring) and SHOBS-P's electrons per unit at that star, not the frame's median (the master flat
+  moves it ±8 % across a field). A frame with no sky known is left out of them. The zero point is not changed.
 - Folder of lights: every frame is measured (0.5 measured at most 150, every Nth). Only a folder of more than 600
   lights is cut down, to runs of consecutive frames spread through the night, so scintillation (C_Y) still compares
   each frame with its true neighbour; C_Y never compares across a gap in the frames (a flip, clouds, or between two
   runs). The Findings say when a folder was cut down.
-- Star names match whatever the spacing or case: "HD219134" and "HD 219134" are one star (a re-run of a night
+- Star names match whatever the spacing or case: "HD219134" and "HD 219134" are one star (a hyphen or space
+  between two digits still counts: TYC 123-4567-1 is not TYC 1234-567-1) (a re-run of a night
   spelled the other way replaces the first; the target is never used as a field star).
+- Credits: SHOBS-P is cited by its concept DOI, 10.5281/zenodo.23417063 (every version).
 
 ## New in 0.5.3
 

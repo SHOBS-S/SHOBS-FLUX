@@ -638,6 +638,12 @@ class ProfilesPage:
             set_msg(self.msg_var, self.msg, f"✖ The values could not be put together ({exc}).")
             return
         copied = copy_text(self.app, text)
+        old = getattr(self, "export_dialog", None)
+        if old is not None:                              # one export window at a time
+            try:
+                old.destroy()
+            except tk.TclError:
+                pass
         self.export_dialog = ExportDialog(self.app, doc, text, copied)
         set_msg(self.msg_var, self.msg, ("✔ Copied for AstroImageJ, EXOTIC and HOPS." if copied else
                                          "⚠ The clipboard could not be used: Save as .txt… instead."))
