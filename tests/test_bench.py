@@ -46,9 +46,12 @@ class TestBench(TempData):
         folder, t = self.ladder(nonlin=0.03)
         r = bench.run_bench(folder, REGION)
         self.assertNear(r.gain, t["gain"], 0.03, "gain with a bending response")
-        # the mean bends by 1 % at e ≈ FW·√(0.01/0.03): ≈ 8,660 e⁻ → 35,140 ADU
-        want = t["full_well"] * math.sqrt(0.01 / t["nonlin"]) / t["gain"] + t["bias"]
-        self.assertNear(r.linear_limit_adu, want, 0.10, "linear limit")
+        # the mean bends by LIN_TOL_PCT (0.5 %) at e ≈ FW·√(0.005/0.03); the limit is the last ladder pair below that
+        # crossing (never interpolated past it, #3), so it sits at or under the crossing, within one ladder step
+        cross = t["full_well"] * math.sqrt(bench.LIN_TOL_PCT / 100 / t["nonlin"]) / t["gain"] + t["bias"]
+        self.assertLessEqual(r.linear_limit_adu, cross * 1.01, "linear limit past the bend")
+        self.assertGreater(r.linear_limit_adu, cross * 0.6, "linear limit far below the bend")
+        self.assertTrue(all(c.max_dev_pct <= bench.LIN_TOL_PCT for c in r.channels.values() if math.isfinite(c.max_dev_pct)))
         self.assertFalse(r.linear_is_bound)
 
     def test_timing_offset(self):
@@ -201,3 +204,45 @@ class TestBench(TempData):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LinearLimitRule(unittest.TestCase):
+    """GitHub SHOBS-FLUX #3 (John, 8 Nov 2026): the linear limit is the LAST bench pair within ±0.5 %, never a point
+    interpolated toward (or the level of) the first pair outside it."""
+
+    def _channel(self, curve, sat_next=False, bias=500.0, rate=1000.0):
+        ch = bench.ChannelResult("G")
+        ch.bias_adu, ch.bias_source = bias, "measured"
+        pts = []
+        for i, (level, dev) in enumerate(curve):
+            t = (level - bias) / rate / (1 + dev / 100)          # exposure that puts this level dev % off the line
+            sig = rate * t * (1 + dev / 100)
+            pts.append(bench.PairStat(exptime=t, order=i, names=("a", "b"), mean_raw=bias + sig, signal=sig, var=1.0,
+                                      var_err=0.1, ratio=1.0, sat_frac=0.0))
+        if sat_next:
+            t = pts[-1].exptime * 1.4
+            pts.append(bench.PairStat(exptime=t, order=len(pts), names=("a", "b"), mean_raw=65535.0,
+                                      signal=65535.0 - bias, var=1.0, var_err=0.1, ratio=1.0, sat_frac=0.5,
+                                      saturated=True))
+        bench._fit_linearity(ch, pts, 65535.0)
+        return ch
+
+    JOHN_G = [(3356.6, -0.021), (5981.6, 0.058), (11217.3, -0.04), (16464.6, 0.002), (26979.4, 0.112),
+              (40129.4, 0.184), (52775.2, -0.742)]           # ASI2600MC Air, gain 100, bench 27 Oct 2026
+
+    def test_tolerance_is_half_a_percent(self):
+        self.assertEqual(bench.LIN_TOL_PCT, 0.5)
+
+    def test_last_pair_in_tolerance_when_the_next_fails(self):
+        ch = self._channel(self.JOHN_G)
+        self.assertAlmostEqual(ch.linear_limit_adu, 40129.4, delta=60)      # not 52,775, not ~49,500 interpolated
+        self.assertFalse(ch.linear_is_bound)
+        self.assertIn("the last pair within ±0.5 %", ch.linear_limit_how)
+        self.assertIn("52,7", ch.linear_limit_how)
+
+    def test_all_pairs_pass_then_saturates_is_at_least(self):
+        ch = self._channel(self.JOHN_G[:-1] + [(52775.2, -0.3)], sat_next=True)
+        self.assertAlmostEqual(ch.linear_limit_adu, 52775.2, delta=80)
+        self.assertTrue(ch.linear_is_bound)
+        self.assertIn("at least", ch.linear_limit_how)
+

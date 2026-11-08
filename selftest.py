@@ -155,9 +155,9 @@ def s3b_bench():
           f"true {t['read_noise']}")
     check(f"full well {r.full_well_e:,.0f} e⁻", abs(r.full_well_e / t["full_well"] - 1) < 0.04,
           f"true {t['full_well']:,.0f}")
-    want = t["full_well"] * math.sqrt(0.01 / t["nonlin"]) / t["gain"] + t["bias"]
-    check(f"linear limit {r.linear_limit_adu:,.0f} ADU", abs(r.linear_limit_adu / want - 1) < 0.10,
-          f"true about {want:,.0f}")
+    want = t["full_well"] * math.sqrt(bench.LIN_TOL_PCT / 100 / t["nonlin"]) / t["gain"] + t["bias"]
+    check(f"linear limit {r.linear_limit_adu:,.0f} ADU (last pair within ±{bench.LIN_TOL_PCT:g} %)",
+          0.6 * want < r.linear_limit_adu <= 1.01 * want, f"bend at about {want:,.0f}; the limit is at or just under it")
     check(f"timing offset {1000 * r.t_offset:+.1f} ms", abs(r.t_offset - 0.004) < 0.001, "true +4.0")
     mono = os.path.join(TMP, "ladder_mono12")
     t = synth_bench.make_ladder(mono, shape=(400, 500), bayer=None, adc_bits=12)

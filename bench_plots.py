@@ -4,7 +4,7 @@ draw(fig, res) fills a matplotlib Figure (no Tk needed, so the tests and the sel
   left    one flat of the ladder, shrunk, with the central region outlined;
   top     the photon transfer curve: temporal variance against signal (ADU², ADU; log–log) per color, the fitted
           line (shot noise + read noise) through the points it rests on, saturated pairs as hollow marks;
-  bottom  linearity: each pair's deviation from the straight line (%) against its raw level (ADU), the ±1 % band,
+  bottom  linearity: each pair's deviation from the straight line (%) against its raw level (ADU), the ±LIN_TOL_PCT band,
           and the linear limit.
 Filled marks = used in the fit; hollow = shown, not used (saturated, or past the straight part)."""
 from __future__ import annotations

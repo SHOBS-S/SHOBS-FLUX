@@ -16,7 +16,7 @@ greens together) or once for a mono camera:
                                  tops out first, (saturation − bias) × gain
   linearity and linear limit     the signal against exposure, S = rate × (t + offset), fitted on the low part of
                                  the ladder; every pair's deviation from that line in percent. The linear limit is
-                                 the highest raw level (ADU, bias included, as a pixel reads) still within ±1 %.
+                                 the highest raw level (ADU, bias included, as a pixel reads) still within ±LIN_TOL_PCT (0.5 %).
   exposure-timing offset         the offset in that line: the time a camera really exposes beyond (or short of)
                                  the exposure it was given
   panel stability                the two frames of each pair, and pairs repeated at one exposure, must agree
@@ -34,7 +34,8 @@ import numpy as np
 import frames as fr
 import shobs_profile as sp
 
-LIN_TOL_PCT = 1.0            # the linear limit: the highest level still within this many percent of the line
+LIN_TOL_PCT = 0.5            # the linear limit: the brightest pair still within this many percent of the line
+                             # (0.5 % from FLUX 0.6.1, John 8 Nov 2026; was 1 % and interpolated past the last good pair)
 SAT_FRACTION = 0.001         # a pair with more than this fraction of region pixels at saturation is saturated
 PAIR_RATIO_TOL = 0.01        # the two frames of a pair must agree to 1 % (panel flicker / drift)
 REGIONS = {"Central 25 %": 0.25, "Central 50 %": 0.5, "Central 10 %": 0.10}
@@ -817,7 +818,8 @@ def _fit_gain(ch: ChannelResult, pts: list, top: float, only: list | None = None
 def _fit_linearity(ch: ChannelResult, pts: list, sat_level: float) -> None:
     """The raw mean level against exposure, M = c + rate·t, fitted on the pairs between 2 % and 30 % of the range;
     each pair's deviation from that line, in percent of its exposure's signal (rate·t); the linear limit = the highest
-    raw level still within ±LIN_TOL_PCT (interpolated to the first pair beyond it). Working on raw levels keeps the
+    raw level still within ±LIN_TOL_PCT: the last good pair itself, never interpolated toward the first bad one (the
+    bend can sit anywhere between them, so only the measured pair is known to be linear; GitHub SHOBS-FLUX #3). Working on raw levels keeps the
     linearity independent of the bias: c is the bias plus rate × timing offset, and the offset comes out only when
     the bias was measured."""
     ch.linear_limit_adu, ch.linear_limit_how, ch.linear_is_bound = float("nan"), "", False
@@ -877,12 +879,8 @@ def _fit_linearity(ch: ChannelResult, pts: list, sat_level: float) -> None:
     lim = last_ok.mean_raw
     how = "the brightest pair still within ±{:g} %".format(LIN_TOL_PCT)
     if first_bad is not None and not first_bad.saturated and math.isfinite(first_bad.deviation_pct):
-        d0, d1 = last_ok.deviation_pct, first_bad.deviation_pct
-        edge = LIN_TOL_PCT if d1 > 0 else -LIN_TOL_PCT       # the side of the band the curve leaves by
-        if abs(d1 - d0) > 1e-9 and min(d0, d1) <= edge <= max(d0, d1):
-            f = (edge - d0) / (d1 - d0)
-            lim = last_ok.mean_raw + f * (first_bad.mean_raw - last_ok.mean_raw)
-            how = f"where the curve leaves ±{LIN_TOL_PCT:g} %"
+        how = (f"the last pair within ±{LIN_TOL_PCT:g} % ({last_ok.mean_raw:,.0f} ADU, {last_ok.deviation_pct:+.2f} %); "
+               f"the next, at {first_bad.mean_raw:,.0f} ADU, is off by {first_bad.deviation_pct:+.2f} %")
     elif first_bad is not None and first_bad.saturated:
         how = (f"straight up to the brightest unsaturated pair ({last_ok.mean_raw:,.0f} ADU); the next pair "
                "saturated, so the limit is at least that")
@@ -1086,7 +1084,7 @@ def measured_records(res: BenchResult, run_key: str | None = None) -> tuple[dict
             ("saturation_adu", res.saturation_adu, "ADU", None, None, 0, "level the brightest flats pile up at"),
             ("linear_limit_adu", res.linear_limit_adu, "ADU", None, None, 0,
              (f"at least: straight (±{LIN_TOL_PCT:g} %) to the brightest unsaturated pair" if res.linear_is_bound
-              else f"highest raw level within ±{LIN_TOL_PCT:g} % of the straight line (lowest color)")),
+              else f"last pair within ±{LIN_TOL_PCT:g} % of the straight line (lowest color)")),
             ("bias_level_adu", res.bias_adu, "ADU", None, res.n_bias_pairs, 1, "bias pairs"),
             ("exposure_offset_s", res.t_offset, "s", res.t_offset_sigma, None, 4, "linearity fit")):
         r = _rec(v, unit, sig, n, d, cond, run_key, note, nd)
@@ -1099,7 +1097,7 @@ def measured_records(res: BenchResult, run_key: str | None = None) -> tuple[dict
                   "linear_limit_adu": _rec(ch.linear_limit_adu, "ADU", None, None, d, cond, run_key,
                                            f"at least: straight (±{LIN_TOL_PCT:g} %) to this color's brightest "
                                            "unsaturated pair" if ch.linear_is_bound else
-                                           f"where this color leaves ±{LIN_TOL_PCT:g} % of the straight line", nd=0)}
+                                           f"this color's last pair within ±{LIN_TOL_PCT:g} % of the straight line", nd=0)}
     lead = res.channels.get("G") or next(iter(res.channels.values()))
     curve = [[round(p.mean_raw, 1), round(p.deviation_pct, 3)] for p in sorted(lead.pairs, key=lambda p: p.signal)
              if math.isfinite(p.deviation_pct) and not p.saturated]
