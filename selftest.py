@@ -8,7 +8,8 @@ Sections:
   3 reading frames and Check image on synthetic frames with known camera values
   3b the bench run (photon transfer curve) on synthetic flat-pair ladders with known camera values
   3c the dark run (dark current, hot pixels, edge glow) on synthetic dark libraries, the spec curves and their plots
-  3d on-sky: zero point, extinction, scintillation and the judging of nights on synthetic on-sky logs
+  3d on-sky: zero point, extinction, scintillation and the judging of nights on synthetic on-sky logs; 0.6.0: star
+     names, the folder run's sky and frames, the sky at each star, the header focal length, the AIJ/EXOTIC/HOPS copy
   4 the run history database
   4b History (0.5): trend series, taking a run off, the trend plot and its DTG, profile roll-back, the system report
   5 the window (Check image on a frame, every page) — needs a display
@@ -277,6 +278,38 @@ def s3d_onsky():
     sky_plots.draw(fig, s, None)
     fig.savefig(os.path.join(TMP, "sky.png"))
     check("on-sky plots draw", os.path.getsize(os.path.join(TMP, "sky.png")) > 10000)
+    s3e_060(onsky, synth_sky, sp, cam, s, ds, doc)
+
+
+def s3e_060(onsky, synth_sky, sp, cam, s, ds, doc):
+    """0.6.0: star names, the folder run's sky and frames, the star-local sky, the header focal length, the export."""
+    import numpy as np
+    import sky_folder
+    import tool_export
+    check("“HD219134” and “HD 219134” are one star", onsky.same_name("HD219134", "HD 219134")
+          and not onsky.same_name("HD 219134", "HD 219135"))
+    sky, _w = sky_folder.frame_sky([600, 601, 599, 600.5, 900], 500.0, 1)
+    check("folder sky: clipped mean of the stars' rings", sky is not None and abs(sky - 100.125) < 1e-6)
+    check(f"folder sky under {sky_folder.SKY_MIN_ADU:g} ADU per pixel above the bias is “not measurable”",
+          sky_folder.frame_sky([503, 504, 503.5], 500.0, 1) == (None, "not measurable"))
+    runs = sky_folder.consecutive_runs(2000, sky_folder.MAX_FRAMES)
+    check(f"folders up to {sky_folder.MAX_FRAMES} lights: every frame; more: runs of consecutive frames",
+          sky_folder.consecutive_runs(600, 600) == [(0, 600)] and sum(b - a for a, b in runs) == 600
+          and runs[-1][1] == 2000)
+    d = ds[0]
+    want = d.sky[:, None] * d.star_e()
+    check("noise terms use the sky at each star", np.allclose(d.noise_sky_e(), want, equal_nan=True))
+    tel = {"name": "14in RC", "focal_header": 2906.0, "telescop_header": "iOptron CEM120"}
+    again = onsky.apply_to_profile(s, dict(doc, telescope=dict(doc["telescope"], focal_header=2898.0)), "selftest",
+                                   telescope=tel)
+    check("the header's focal length follows the newest night", again["telescope"]["focal_header"] == 2906.0
+          and again["telescope"]["focal_mm"] == doc["telescope"]["focal_mm"])
+    sp.save_profile(cam, "selftest")
+    text = tool_export.text(doc)
+    check("Copy for AstroImageJ / EXOTIC / HOPS: each program's fields, with sources",
+          all(w in text for w in ("CCD gain [e-/count]", "CCD readout noise [e-]",
+                                  "\"Image Scale (Ex: 5.21 arcsecs/pixel)\"", "Camera gain in e/ADU"))
+          and "measured" in text)
 
 
 def s4_history():
@@ -364,6 +397,13 @@ def s5_window():
         app.show_credits()
         app.update()
         check("every page and Credits open", app.title_var.get() == "Credits and sources")
+        import style
+        from tkinter import ttk
+        tree = app.sky_page.tree
+        short = [tree.heading(c, "text") for c in tree["columns"]
+                 if int(tree.column(c, "width")) < style.heading_width(tree, tree.heading(c, "text"))]
+        check("the Sky table's headings fit", not short, ", ".join(short))
+        check("checkboxes tick with a check mark", style.CHECK_ELEMENT in str(ttk.Style(app).layout("TCheckbutton")))
     finally:
         app.destroy()
 
