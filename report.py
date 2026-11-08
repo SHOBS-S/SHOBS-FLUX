@@ -440,7 +440,11 @@ def gather(system_path: str, prefs: dict | None = None, event: str = "", optics_
 
     dates = sorted(p["date"] for p in pts_all)
     cam_dates = sorted(str(r["rec"].get("date"))[:10] for r in cam_rows if r["rec"] and r["rec"].get("date"))
-    nights = sorted({(p["date"], p.get("target") or "") for p in pts_all if p["kind"] == "onsky"})
+    seen_n: dict = {}
+    for p in pts_all:                      # one night per date and target, however SHOBS-P spelled the target
+        if p["kind"] == "onsky":
+            seen_n.setdefault((p["date"], onsky.name_key(p.get("target"))), (p["date"], p.get("target") or ""))
+    nights = sorted(seen_n.values())
     info = {
         "system_id": sid, "system_path": system_path, "doc": doc, "telescope": tel, "camera_id": cam_id,
         "camera_path": cam_path, "cam": cam, "camera": camera, "mode": mode, "spec": spec,

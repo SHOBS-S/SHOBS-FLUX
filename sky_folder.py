@@ -7,8 +7,15 @@ is measured on its raw pixels. Nothing is subtracted from the frames: the sky is
 star, so bias, dark and sky all cancel. A star's flux is the raw ADU of its color inside a fixed circular aperture
 minus the ring's level (log flag flux_is_adu_sum: one unit = one ADU = gain electrons). Its raw peak is the brightest
 single camera pixel of that color in the aperture (ADU as written, bias included), which onsky compares with the
-camera's linear limit. The frame's sky is the ring level minus the bias (from the camera profile, else worked out from
-the sky noise and the gain: approximate).
+camera's linear limit. The frame's sky is the clipped mean of the stars' ring levels (onsky.clipped, 3 robust sigma:
+a ring with a faint star in it is left out) minus the bias (from the camera profile, else worked out from the sky
+noise and the gain: approximate). A frame whose sky sits less than SKY_MIN_ADU per camera pixel above the bias (or
+below it) has a sky that is NOT MEASURABLE: it is written as null, never as a number it is not. Each star's own ring
+level (bias taken off) is written with it too, for the noise terms (onsky: the sky around each star).
+
+HOW MANY FRAMES. Every light is measured (0.6.0; before, at most 150, every Nth). Only a folder of more than
+MAX_FRAMES lights is cut down, and then to runs of consecutive frames spread through the night, never every Nth, so
+the scintillation (C_Y) still compares each frame with its true neighbour.
 
 WHERE THE STARS ARE. A plate solution in the header (ASIAIR writes one, with SIP terms) is used on the raw pixels. A
 measured pixel (xc, yc) sits at raw (2 xc + dx, 2 yc + dy), 0-based, where (dx, dy) is the mean place of the color's
@@ -61,6 +68,9 @@ N_DETECT_BLIND, N_CAT_BLIND = 40, 80
 N_TRACK = 30                  # brightest first-frame stars followed from frame to frame
 TRACK_SEARCH_PX = 30.0
 FWHM_STARS = 20
+MAX_FRAMES = 600              # a folder with more lights than this is measured in runs of consecutive frames
+RUN_FRAMES = 50               # ...each this long (at most), spread evenly through the night
+SKY_MIN_ADU = 5.0             # sky less than this per camera pixel above the bias: too close to it to measure
 LINEAR_GUESS_ADU = onsky.LINEAR_GUESS_ADU
 OSC_BANDS = {"G": "TG", "R": "TR", "B": "TB"}
 
@@ -618,11 +628,37 @@ def _track(im: Image, ref: np.ndarray, prev, r: float):
 
 # ---- the run ---------------------------------------------------------------------------------------------------------
 
-def _subsample(items: list, n: int) -> list:
-    if n <= 0 or len(items) <= n:
-        return list(items)
-    idx = np.unique(np.round(np.linspace(0, len(items) - 1, n)).astype(int))
-    return [items[i] for i in idx]
+def consecutive_runs(n_items: int, cap: int, run_len: int = RUN_FRAMES) -> list[tuple[int, int]]:
+    """[(start, stop)] index ranges of runs of CONSECUTIVE items, cap of them in all, spread evenly from the first
+    item to the last (the night's whole airmass track), each at most run_len long (at least 10 when the cap allows).
+    All of them as one run when n_items <= cap."""
+    if cap <= 0 or n_items <= cap:
+        return [(0, n_items)]
+    run_len = max(1, min(run_len, cap, max(10, cap // 12)))
+    n_runs = max(1, int(round(cap / run_len)))
+    sizes = [cap // n_runs + (1 if i < cap % n_runs else 0) for i in range(n_runs)]
+    starts = np.round(np.linspace(0, n_items - max(sizes), n_runs)).astype(int) if n_runs > 1 else [0]
+    out, last = [], 0
+    for st, sz in zip(starts, sizes):
+        st = max(int(st), last)                       # never overlapping
+        out.append((st, min(n_items, st + sz)))
+        last = st + sz
+    return out
+
+
+def frame_sky(skies, bias_px: float, n_sum: int):
+    """A frame's sky (ADU per measured pixel above the bias) from its stars' ring levels: their clipped mean
+    (onsky.clipped) minus the bias. (sky, why): sky None with why "not measurable" when it sits less than SKY_MIN_ADU
+    per camera pixel above the bias (or below it), None with why "" when there are no rings."""
+    v = np.asarray([x for x in skies if x is not None and math.isfinite(x)], dtype=float)
+    if not v.size:
+        return None, ""
+    keep = onsky.clipped(v)
+    mean = float(np.mean(v[keep])) if keep.any() else float(np.median(v))
+    above = mean - bias_px
+    if above < SKY_MIN_ADU * max(int(n_sum), 1):
+        return None, "not measurable"
+    return above, ""
 
 
 def _bias_estimate(im: Image, gain, rn_e):
@@ -640,6 +676,10 @@ def _bias_estimate(im: Image, gain, rn_e):
     return float(min(vals)) if vals else None
 
 
+def _plural(n: int, word: str) -> str:
+    return f"{n} {word}{'' if n == 1 else 's'}"
+
+
 def _rnd(v, nd):
     if v is None:
         return None
@@ -647,7 +687,7 @@ def _rnd(v, nd):
     return round(v, nd) if math.isfinite(v) else None
 
 
-def run_folder(folder: str, channel: str = "G", step=None, catalog=None, cam_lookup=None, max_frames: int = 150,
+def run_folder(folder: str, channel: str = "G", step=None, catalog=None, cam_lookup=None, max_frames: int = MAX_FRAMES,
                site: dict | None = None, elevation_m: float | None = None, variables=None) -> FolderResult:
     """Measure a folder of light frames and return its on-sky log (FolderResult.doc). channel: the Bayer color for a
     color camera (G, R or B, or the band codes TG, TR, TB; ignored for mono, where FILTER decides).
@@ -694,9 +734,13 @@ def run_folder(folder: str, channel: str = "G", step=None, catalog=None, cam_loo
     lights.sort(key=lambda t: (jd_mid_of(t[1]) or 0.0, t[0]))
     cadence = cadence_of(lights)                  # from EVERY light's header, before any are skipped for speed
     if len(lights) > max_frames:
-        L.append(("info", f"{len(lights)} light frames: every {len(lights) / max_frames:.1f}th of them is measured "
-                          f"({max_frames})."))
-        lights = _subsample(lights, max_frames)
+        runs = consecutive_runs(len(lights), max_frames)
+        n_all = len(lights)
+        lights = [lights[i] for a, b in runs for i in range(a, b)]
+        L.append(("info", f"{n_all} light frames, more than {max_frames}: {len(lights)} are measured, in "
+                          f"{_plural(len(runs), 'run')} of about {round(len(lights) / len(runs))} consecutive frames "
+                          "spread through the night (consecutive, so the scintillation C_Y compares each frame with "
+                          "its true neighbour; the time between frames is from all of them)."))
     cat_band = catalogs.catalog_band(band)
     res.band = band
     color = channel if osc else "M"
@@ -712,7 +756,10 @@ def run_folder(folder: str, channel: str = "G", step=None, catalog=None, cam_loo
     gain = nums["gain"]
     binning = key0.get("binning") or 1
     pixel_um = (key0.get("pixel_um") or 0.0) * binning or None
-    focal = key0.get("focal_mm")
+    # the folder's own FOCALLEN: the median of its lights (0.6.0; ASIAIR writes each plate solve's focal length, so
+    # the first light alone is a few mm off the rest)
+    focals = sorted(f for f in (sp.setup_key(h).get("focal_mm") for _p, h in lights) if f)
+    focal = float(focals[len(focals) // 2]) if focals else key0.get("focal_mm")
     target = _str(h0, "OBJECT") or os.path.basename(os.path.normpath(folder))
     res.target = target
 
@@ -892,6 +939,7 @@ def run_folder(folder: str, channel: str = "G", step=None, catalog=None, cam_loo
     if cam:
         bv, _ = sp.camera_value(cam, "bias_level_adu")
         bias = onsky._f(bv)
+    bias_from_profile = bias is not None
     if bias is None:
         if gain:
             bias = _bias_estimate(im0, gain, nums["read_noise_e"])
@@ -906,6 +954,7 @@ def run_folder(folder: str, channel: str = "G", step=None, catalog=None, cam_loo
     rot0 = fr.hfloat(f0.header, "ROTATOR", "ROTATANG", "ROTANGLE")
     out_frames = []
     n_recentred = 0
+    n_sky_out = 0
     n_lights = len(lights)
     for k, (p, hk) in enumerate(lights):
         say(f"Reading frame {k + 1} of {n_lights}")
@@ -1002,8 +1051,9 @@ def run_folder(folder: str, channel: str = "G", step=None, catalog=None, cam_loo
                         again[name] = ph
                 if again:
                     meas = again
-        skies = [v["sky"] for v in meas.values() if math.isfinite(v["sky"])]
-        sky = (float(np.median(skies)) - bias_px) if skies else None
+        sky, why_sky = frame_sky([v["sky"] for v in meas.values()], bias_px, im.n_sum)
+        if why_sky:
+            n_sky_out += 1
         pier = _str(f.header, "PIERSIDE")
         rot = fr.hfloat(f.header, "ROTATOR", "ROTATANG", "ROTANGLE")
         seg = ""
@@ -1013,9 +1063,11 @@ def run_folder(folder: str, channel: str = "G", step=None, catalog=None, cam_loo
         stars_k = {}
         for name, v in meas.items():
             fl = v["flux"]
+            ring = v["sky"] - bias_px if math.isfinite(v["sky"]) else None
             stars_k[name] = {"flux": _rnd(fl, 3),
                              "inst_mag": _rnd(-2.5 * math.log10(fl / exptime), 5) if fl > 0 else None,
-                             "peak_adu": _rnd(v["peak_adu"], 0), "x": _rnd(v["x"], 2), "y": _rnd(v["y"], 2)}
+                             "peak_adu": _rnd(v["peak_adu"], 0), "x": _rnd(v["x"], 2), "y": _rnd(v["y"], 2),
+                             "sky": _rnd(max(ring, 0.0), 3) if ring is not None else None}
         out_frames.append({"file": f.name, "jd_mid": round(float(jd), 6), "airmass": fr.hfloat(f.header, "AIRMASS"),
                            "exptime_s": float(exptime), "focuspos": fr.hfloat(f.header, "FOCUSPOS", "FOCPOS"),
                            "pierside": pier, "ccd_temp_c": fr.hfloat(f.header, "CCD-TEMP"), "segment": seg,
@@ -1059,6 +1111,13 @@ def run_folder(folder: str, channel: str = "G", step=None, catalog=None, cam_loo
     for fm in out_frames:
         fm.pop("_site", None)
 
+    if n_sky_out:
+        L.append(("info", f"Sky not measurable on {n_sky_out} of {len(out_frames)} frames: less than "
+                          f"{SKY_MIN_ADU:g} ADU per camera pixel above the bias "
+                          f"({'from the camera profile' if bias_from_profile else 'worked out from the sky noise'}), "
+                          "too close to it to tell" + (", so this night gives no sky brightness."
+                                                      if n_sky_out == len(out_frames) else
+                                                      "; the sky brightness comes from the other frames.")))
     if n_recentred:
         L.append(("info", f"Stars were found off their predicted places on {n_recentred} pass"
                           f"{'es' if n_recentred != 1 else ''} (the field drifted, or a header solution was old): "
@@ -1106,7 +1165,8 @@ def run_folder(folder: str, channel: str = "G", step=None, catalog=None, cam_loo
 
 
 def cadence_of(lights: list) -> dict | None:
-    """Time from one light to the next, from all the folder's headers (frames measured may be every Nth):
+    """Time from one light to the next, from all the folder's headers (a very large folder is measured in runs of
+    consecutive frames, with gaps between them):
     {"interval_s", "exptime_s", "n"} for the most common exposure, or None. Gaps over 2.5 × the median left out."""
     rows = [(jd_mid_of(h), fr.exptime_of(h)) for _p, h in lights]
     rows = sorted((j, e) for j, e in rows if j and e)

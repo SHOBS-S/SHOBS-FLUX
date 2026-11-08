@@ -48,6 +48,20 @@ SCRATCH_PREF = "sky_scratch_logs"                    # folder-run logs never sav
 
 
 TEL_FIELDS = ("name", "aperture_mm", "elevation_m", "lat", "lon")
+# the nights table: (heading, width at 100 %, what the column means: the heading's hover note)
+NIGHT_HEADS = (("Night", 86, "The night's date (the evening's date); “imaging” for astrophotography frames."),
+               ("Target", 110, "The field's target as the log names it."),
+               ("Band", 44, "TG / TR / TB: the green, red or blue pixels of a color camera; a mono camera's filter."),
+               ("Frames", 54, "Frames used from this night's log."),
+               ("From", 64, "Who measured the night: SHOBS-P (its on-sky log) or FLUX (a folder of lights)."),
+               ("Zero point", 76, "Magnitude that gives 1 e⁻/s at airmass 1."),
+               ("k", 92, "Extinction (mag per airmass): this night's own, or where it came from."),
+               ("Photometric", 82, "✔ = the zero point held steady in 10-minute bins; marginal = it drifted."),
+               ("Seeing ″", 110, "Star size (FWHM) in arcseconds; defocused and imaging runs are marked."),
+               ("Sky mag/″²", 80, "Sky brightness in magnitudes per square arcsecond (bigger = darker)."),
+               ("C_Y", 46, "Young's scintillation coefficient (Osborn et al. 2015)."),
+               ("Between frames s", 108, "Seconds lost between frames (download, save and any delay you set)."),
+               ("Status", 320, "What the night was used for, or its worst finding."))
 
 
 def resolve_system_id(name: str, focal, cam: str) -> str:
@@ -420,15 +434,15 @@ class SkyPage:
         tw = ttk.Frame(left, style="Card.TFrame")
         left.add(tw, weight=1)
         cols = ("night", "target", "band", "frames", "from", "zp", "k", "phot", "seeing", "sky", "cy", "oh", "status")
-        heads = (("Night", 86), ("Target", 110), ("Band", 44), ("Frames", 54), ("From", 64), ("Zero point", 76),
-                 ("k", 92), ("Photometric", 82), ("Seeing ″", 110), ("Sky mag/″²", 80), ("C_Y", 46),
-                 ("Between frames s", 108), ("Status", 320))
         self.tree = ttk.Treeview(tw, columns=cols, show="headings", selectmode="browse", height=6)
-        for c, (head, w) in zip(cols, heads):
+        for c, (head, w, _tip) in zip(cols, NIGHT_HEADS):
             self.tree.heading(c, text=head)
             self.tree.column(c, width=px(app, w), minwidth=px(app, 36), stretch=(c == "status"),
                              anchor="w" if c in ("night", "target", "band", "from", "seeing", "status", "phot")
                              else "e")
+        # 0.6.0: every heading shows whole at any Windows scaling (100 %, 125 %, 150 %), with a hover note
+        style.fit_headings(self.tree, {"night": "2026-10-20", "from": "SHOBS-P", "zp": "20.200"})
+        self.head_tips = style.HeadingTips(self.tree, {c: tip for c, (_h, _w, tip) in zip(cols, NIGHT_HEADS)})
         self.tree.tag_configure("old", foreground=GREY)
         self.tree.tag_configure("bad", foreground=style.BAD)
         vb = ttk.Scrollbar(tw, orient=tk.VERTICAL, command=self.tree.yview)
@@ -1104,12 +1118,10 @@ class SkyPage:
         s = res.summary
         ds = max(res.datasets, key=lambda d: (d.night, d.written))
         focal = focal_of(res.datasets)
-        heads = [sp._finite(d.setup.get("focal_header_mm")) for d in res.datasets]
-        heads = [h for h in heads if h]
         aperture = sp._finite(self.aperture_var.get().strip().replace(",", "") or None)
         telescope = {"name": self.name_var.get().strip(), "aperture_mm": aperture,
                      "focal_mm": round(focal) if focal else None,
-                     "focal_header": sorted(heads)[len(heads) // 2] if heads else None,
+                     "focal_header": focal_header_of(res.datasets),
                      "telescop_header": ds.setup.get("telescop_header")}
         cam = camera_of(res)
         doc = onsky.apply_to_profile(s, old, settings.WRITTEN_BY, run_key, keep_user, system_id=pid, cam_id=cam,
@@ -1127,7 +1139,7 @@ class SkyPage:
             res.recorded = True
             settings.log(f"on-sky run {run_key}: {n_new} night run{'s' if n_new != 1 else ''} new in the history")
         if not (self.sky_recorded and run_key == self.run_key):
-            history.record_run("sky", res.folder or sp.onsky_dir(make=False), sky_summary(s), camera_id=cam,
+            history.record_run("sky", saved_source(res), sky_summary(s), camera_id=cam,
                                system_id=pid, n_frames=sum(r.n_frames for r in s.nights), status=sky_status(s),
                                app=settings.WRITTEN_BY, values=sky_values(s, pid), run_key=run_key)
             self.sky_recorded = run_key == self.run_key
@@ -1288,6 +1300,16 @@ def focal_of(datasets) -> float | None:
     return f[len(f) // 2] if f else None
 
 
+def focal_header_of(datasets) -> float | None:
+    """The focal length the NEWEST night's headers give (FOCALLEN; the profile's "Focal length in the header"), or
+    None when that night's headers have none. 0.6.0: refreshed on every save, never left at the first run's."""
+    for d in sorted(datasets, key=lambda d: (d.night, d.written), reverse=True):
+        f = sp._finite(d.setup.get("focal_header_mm"))
+        if f:
+            return f
+    return None
+
+
 def camera_of(res: SkyRun) -> str:
     ids = [d.camera_id for d in res.datasets]
     return Counter(ids).most_common(1)[0][0] if ids else ""
@@ -1446,10 +1468,28 @@ def sky_summary(s) -> dict:
                   if why.startswith("disagrees")), "")
     if not worst and not any(math.isfinite(b.zp1) for b in s.bands.values()):
         worst = "⚠ no photometric night yet"
+    newest = sorted(s.nights, key=lambda r: (r.ds.night, r.ds.written), reverse=True)
+    logs = []
+    for r in newest:                                 # the logs it read, newest first (the History page names them)
+        b = os.path.basename(r.ds.path or "")
+        if b and b not in logs:
+            logs.append(b)
     return {"nights": len(onsky_nights(s.nights)), "runs": len(s.nights),
+            "logs": logs, "night_list": sorted(onsky_nights(s.nights)),
             "photometric": len(onsky_nights([r for r in s.nights if r.photometric])),
             "imaging_nights": len(onsky_nights([r for r in s.nights if r.imaging])),
             "replaced": len(s.replaced), "bands": bands, "overhead_s": n(s.overhead_s, 3), "worst": worst}
+
+
+def saved_source(res: SkyRun) -> str:
+    """What a saved run read, for the run history's source: a folder run's folder of lights; a logs run's NEWEST
+    on-sky log (its file name holds the night and target, as a night run's does; 0.5 wrote only the onsky folder)."""
+    if res.source == "folder" and res.folder:
+        return res.folder
+    s = res.summary
+    best = max((r for r in (s.nights if s else []) if r.ds.path), key=lambda r: (r.ds.night, r.ds.written),
+               default=None)
+    return best.ds.path if best is not None else sp.onsky_dir(make=False)
 
 
 def sky_status(s) -> str:

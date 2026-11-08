@@ -513,7 +513,14 @@ class ProfilesPage:
         ttk.Button(top, text="Spec curves…", command=self.spec_curves).pack(side=tk.LEFT, padx=(px(app, 8), 0))
         self.roll_btn = ttk.Button(top, text="Roll back…", command=self.roll_back)
         self.roll_btn.pack(side=tk.LEFT, padx=(px(app, 8), 0))
+
         ttk.Button(top, text="Open the data folder", command=lambda: open_folder(sp.data_dir())).pack(side=tk.RIGHT)
+        row2 = ttk.Frame(self.frame, style="Card.TFrame")
+        row2.pack(fill=tk.X, pady=(px(app, 6), 0))
+        self.export_btn = ttk.Button(row2, text="Copy for AstroImageJ / EXOTIC / HOPS…", command=self.copy_for_tools)
+        self.export_btn.pack(side=tk.LEFT)
+        ttk.Label(row2, text="this profile's camera values and plate scale, in each program's own field names",
+                  style="Hint.TLabel").pack(side=tk.LEFT, padx=(px(app, 8), 0))
         self.msg_var = tk.StringVar()
         self.msg = ttk.Label(self.frame, textvariable=self.msg_var, style="Card.TLabel")
         self.msg.pack(anchor="w", fill=tk.X, pady=(px(app, 4), 0))
@@ -537,7 +544,9 @@ class ProfilesPage:
         hint = ttk.Label(self.frame, style="Hint.TLabel", justify=tk.LEFT,
                          text="Spec curves… shows, types, imports and exports the maker's curves. Every save keeps "
                               "the previous revision; Roll back… puts an earlier one back (as a new revision, so a "
-                              "roll-back can be undone too).")
+                              "roll-back can be undone too). Copy for AstroImageJ / EXOTIC / HOPS… copies this "
+                              "profile's gain, read noise, dark current, linear limit, saturation and plate scale "
+                              "in those programs' own words.")
         hint.pack(anchor="w", fill=tk.X, pady=(px(app, 4), 0))
         follow_wrap(hint, self.frame, px(app, 10))
         self.paths: dict[str, str] = {}
@@ -614,6 +623,25 @@ class ProfilesPage:
                 SOURCE_TAG.get(rec.get("source"), rec.get("source")), rec.get("date") or "", rec.get("note") or ""))
             self.rec_paths[iid] = rpath
 
+    def copy_for_tools(self):
+        """Copy the chosen profile's values for AstroImageJ, EXOTIC and HOPS to the clipboard, and show them (with
+        Save as .txt…)."""
+        if not self.doc or self.doc[1].get("format") not in (sp.CAMERA_FORMAT, sp.SYSTEM_FORMAT):
+            set_msg(self.msg_var, self.msg, "⚠ Pick a camera or system profile first.")
+            return
+        import tool_export
+        doc = self.doc[1]
+        try:
+            text = tool_export.text(doc)
+        except Exception as exc:                        # never a crash on a profile with odd values
+            settings.log(f"export for AstroImageJ / EXOTIC / HOPS failed: {exc!r}")
+            set_msg(self.msg_var, self.msg, f"✖ The values could not be put together ({exc}).")
+            return
+        copied = copy_text(self.app, text)
+        self.export_dialog = ExportDialog(self.app, doc, text, copied)
+        set_msg(self.msg_var, self.msg, ("✔ Copied for AstroImageJ, EXOTIC and HOPS." if copied else
+                                         "⚠ The clipboard could not be used: Save as .txt… instead."))
+
     def roll_back(self):
         if not self.doc or self.doc[1].get("format") not in (sp.CAMERA_FORMAT, sp.SYSTEM_FORMAT):
             set_msg(self.msg_var, self.msg, "⚠ Pick a camera or system profile first.")
@@ -684,6 +712,82 @@ class ProfilesPage:
         set_msg(self.msg_var, self.msg, f"✔ Saved {rollback.number_words(val)} {rec.get('unit') or ''}; the previous "
                                         "revision is in the history folder." +
                 (f" Worked out again from it: {', '.join(redone).lower()}." if redone else ""))
+
+
+def copy_text(root, text: str) -> bool:
+    """Put text on the clipboard (kept after FLUX closes on Windows). False when the clipboard cannot be used."""
+    try:
+        root.clipboard_clear()
+        root.clipboard_append(text)
+        root.update_idletasks()
+        return True
+    except tk.TclError:
+        return False
+
+
+class ExportDialog(tk.Toplevel):
+    """What Copy for AstroImageJ / EXOTIC / HOPS put on the clipboard: Copy again, Save as .txt…, Close."""
+
+    def __init__(self, app, doc: dict, text: str, copied: bool):
+        super().__init__(app)
+        self.app, self.doc, self.text_out = app, doc, text
+        self.title(f"{settings.APP_NAME}: values for AstroImageJ, EXOTIC and HOPS")
+        self.configure(bg=style.CARD)
+        self.transient(app)
+        body = ttk.Frame(self, style="Card.TFrame", padding=(px(app, 16), px(app, 12)))
+        body.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(body, text="Values for AstroImageJ, EXOTIC and HOPS", style="Title.TLabel").pack(anchor="w")
+        ttk.Label(body, style="Hint.TLabel", justify=tk.LEFT, wraplength=px(app, 760),
+                  text="Each program's fields in its own words and order, for this profile. Type or paste each "
+                       "value into the field of the same name. A value the profile does not have says “not measured "
+                       "yet”.").pack(anchor="w", fill=tk.X, pady=(0, px(app, 8)))
+        tf = ttk.Frame(body, style="Card.TFrame")
+        tf.pack(fill=tk.BOTH, expand=True)
+        self.text = tk.Text(tf, wrap="none", font=(style.MONO_FONT, 9), height=30, width=118, background="#ffffff",
+                            foreground=style.TEXT, relief="flat", padx=px(app, 6), pady=px(app, 6))
+        vb = ttk.Scrollbar(tf, orient=tk.VERTICAL, command=self.text.yview)
+        hb = ttk.Scrollbar(tf, orient=tk.HORIZONTAL, command=self.text.xview)
+        self.text.configure(yscrollcommand=vb.set, xscrollcommand=hb.set)
+        hb.pack(side=tk.BOTTOM, fill=tk.X)
+        vb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.text.insert("1.0", text)
+        self.text.configure(state="disabled")
+        self.msg_var = tk.StringVar()
+        self.msg = ttk.Label(body, textvariable=self.msg_var, style="Card.TLabel")
+        self.msg.pack(anchor="w", fill=tk.X, pady=(px(app, 6), 0))
+        set_msg(self.msg_var, self.msg, "✔ Copied to the clipboard." if copied else
+                "⚠ The clipboard could not be used: Save as .txt… instead.")
+        btns = ttk.Frame(body, style="Card.TFrame")
+        btns.pack(fill=tk.X, pady=(px(app, 8), 0))
+        style.green_button(btns, "Copy to the clipboard", self.copy).pack(side=tk.LEFT)
+        ttk.Button(btns, text="Save as .txt…", command=self.save_as).pack(side=tk.LEFT, padx=(px(app, 8), 0))
+        ttk.Button(btns, text="Close", command=self.destroy).pack(side=tk.RIGHT)
+        self.bind("<Escape>", lambda _e: self.destroy())
+
+    def copy(self):
+        ok = copy_text(self.app, self.text_out)
+        set_msg(self.msg_var, self.msg, "✔ Copied to the clipboard." if ok else
+                "⚠ The clipboard could not be used: Save as .txt… instead.")
+
+    def save_as(self, path: str | None = None) -> bool:
+        import tool_export
+        if path is None:
+            path = filedialog.asksaveasfilename(parent=self, title="Save the values as text",
+                                                initialdir=tool_export.downloads_dir(),
+                                                initialfile=tool_export.default_name(self.doc),
+                                                defaultextension=".txt", filetypes=[("Text", "*.txt")])
+            if not path:
+                return False
+        try:
+            with open(path, "w", encoding="utf-8", newline="\n") as fh:
+                fh.write(self.text_out)
+        except OSError as exc:
+            set_msg(self.msg_var, self.msg, f"✖ Not saved ({exc}).")
+            return False
+        settings.log(f"values for AstroImageJ / EXOTIC / HOPS saved to {path}")
+        set_msg(self.msg_var, self.msg, f"✔ Saved to {path}.")
+        return True
 
 
 class RollbackDialog(tk.Toplevel):

@@ -188,6 +188,7 @@ def setup(root) -> ttk.Style:
     st.map("Card.TRadiobutton", background=[("active", "#f2f5f7")])
     st.configure("Card.TCheckbutton", background=CARD, foreground=TEXT)
     st.map("Card.TCheckbutton", background=[("active", "#f2f5f7")])
+    check_indicator(root, st)
     st.configure("Group.TLabelframe", background=CARD, bordercolor=LINE)
     st.configure("Group.TLabelframe.Label", background=CARD, foreground=SIDE, font=font(10, "bold"))
     st.configure("TNotebook", background=CARD, bordercolor=LINE)
@@ -207,6 +208,147 @@ def setup(root) -> ttk.Style:
     st.configure("Treeview.Heading", font=font(10, "bold"), padding=(s(4), s(5)))
     st.map("Treeview", background=[("selected", "#cfe0ee")], foreground=[("selected", TEXT)])
     return st
+
+
+# ---- the checkbox: a check mark, never clam's × (John, 8 Nov 2026) --------------------------------------------------
+CHECK_ELEMENT = "Shobs.Checkbutton.indicator"
+CHECK_FILL = SIDE             # a ticked box: navy with a white check mark
+CHECK_EDGE = HINT
+
+
+def _seg_dist(px_, py_, a, b) -> float:
+    (ax, ay), (bx, by) = a, b
+    dx, dy = bx - ax, by - ay
+    t = max(0.0, min(1.0, ((px_ - ax) * dx + (py_ - ay) * dy) / float(dx * dx + dy * dy or 1)))
+    return ((px_ - ax - t * dx) ** 2 + (py_ - ay - t * dy) ** 2) ** 0.5
+
+
+def check_image(root, size: int, ticked: bool, disabled: bool = False, gap: int = 0) -> tk.PhotoImage:
+    """One checkbox picture, size pixels square (+ gap transparent pixels on its right before the words): a box with
+    a 1-pixel edge; ticked = filled with a white check mark (✓ shape), the same on Windows, Mac and Linux."""
+    img = tk.PhotoImage(master=root, width=size + gap, height=size)
+    edge = LINE if disabled else CHECK_EDGE
+    fill = (mix(CHECK_FILL, "#ffffff", 0.6) if disabled else CHECK_FILL) if ticked else \
+        ("#eef2f4" if disabled else "#ffffff")
+    img.put(edge, to=(0, 0, size, size))
+    img.put(fill, to=(1, 1, size - 1, size - 1))
+    if ticked:
+        n = float(size)
+        pts = ((0.22 * n, 0.52 * n), (0.42 * n, 0.72 * n), (0.79 * n, 0.29 * n))
+        half = max(1.0, n / 13.0)
+        for y in range(1, size - 1):
+            for x in range(1, size - 1):
+                cx, cy = x + 0.5, y + 0.5
+                if min(_seg_dist(cx, cy, pts[0], pts[1]), _seg_dist(cx, cy, pts[1], pts[2])) <= half:
+                    img.put("#ffffff", to=(x, y))
+    return img
+
+
+def check_indicator(root, st: ttk.Style) -> None:
+    """Every ttk Checkbutton draws its box with CHECK_ELEMENT (a check mark when ticked) instead of the clam theme's
+    ×. The pictures follow the display's scaling, so the box is the same size against the words at 100 % and 125 %."""
+    try:
+        from tkinter import font as tkfont
+        size = max(11, int(round(tkfont.Font(root, font=font(10)).metrics("ascent") * 1.05)))
+        gap = px(root, 6)
+        imgs = {k: check_image(root, size, *k, gap=gap) for k in ((False, False), (True, False), (False, True),
+                                                                   (True, True))}
+        root._shobs_check_images = imgs              # keep them alive for as long as the window
+        if CHECK_ELEMENT not in st.element_names():
+            st.element_create(CHECK_ELEMENT, "image", imgs[(False, False)],
+                              ("disabled", "selected", imgs[(True, True)]), ("selected", imgs[(True, False)]),
+                              ("disabled", imgs[(False, True)]), sticky="")
+        st.layout("TCheckbutton", [("Checkbutton.padding", {"sticky": "nswe", "children": [
+            (CHECK_ELEMENT, {"side": "left", "sticky": ""}),
+            ("Checkbutton.focus", {"side": "left", "sticky": "w", "children": [
+                ("Checkbutton.label", {"sticky": "nswe"})]})]})])
+    except tk.TclError:
+        pass                                          # the theme's own box, never no box
+
+
+HEAD_PAD = 14                 # a heading's padding (4 each side) and the column's separator, in 96-dpi pixels
+
+
+def heading_width(widget, text: str) -> int:
+    """Pixels a Treeview heading needs to show text whole, at this display's scaling (the bold heading font is in
+    points, so it grows with Windows' 125 % / 150 % just as px() does)."""
+    from tkinter import font as tkfont
+    f = tkfont.Font(widget, font=font(10, "bold"))
+    return max(f.measure(line) for line in str(text).split("\n")) + px(widget, HEAD_PAD)
+
+
+def fit_headings(tree: ttk.Treeview, samples: dict | None = None) -> None:
+    """Make every column of tree at least as wide as its heading (never cut off: "Between frames s" at 125 %), and
+    as a sample of what it holds (samples: column → the widest usual text, e.g. "SHOBS-P")."""
+    from tkinter import font as tkfont
+    body = tkfont.Font(tree, font=font(10))
+    for c in tree["columns"]:
+        need = heading_width(tree, tree.heading(c, "text"))
+        if samples and samples.get(c):
+            need = max(need, body.measure(samples[c]) + px(tree, 12))
+        tree.column(c, width=max(int(tree.column(c, "width")), need),
+                    minwidth=max(int(tree.column(c, "minwidth")), need))
+
+
+class HeadingTips:
+    """A small hover note on a Treeview's column headings: what each column means (tips: column → words). Shown
+    after a short pause while the pointer is on a heading, gone when it leaves."""
+
+    def __init__(self, tree: ttk.Treeview, tips: dict):
+        self.tree, self.tips = tree, dict(tips)
+        self.tip = None
+        self.col = None
+        self._job = None
+        tree.bind("<Motion>", self._motion, add="+")
+        tree.bind("<Leave>", lambda _e: self._hide(), add="+")
+
+    def column_at(self, x: int, y: int) -> str | None:
+        """The column whose heading is at (x, y) in the tree, or None."""
+        try:
+            if self.tree.identify_region(x, y) != "heading":
+                return None
+            c = self.tree.identify_column(x)            # '#3'
+            i = int(c.lstrip("#")) - 1
+            cols = self.tree["columns"]
+            return cols[i] if 0 <= i < len(cols) else None
+        except (tk.TclError, ValueError):
+            return None
+
+    def _motion(self, e):
+        c = self.column_at(e.x, e.y)
+        if c == self.col:
+            return
+        self._hide()
+        self.col = c
+        if c and self.tips.get(c):
+            self._job = self.tree.after(450, lambda: self.show(c, e.x_root, e.y_root))
+
+    def show(self, c: str, x: int, y: int) -> None:
+        self._job = None
+        try:
+            tip = tk.Toplevel(self.tree)
+            tip.wm_overrideredirect(True)
+            tip.wm_geometry(f"+{x + px(self.tree, 12)}+{y + px(self.tree, 16)}")
+            ttk.Label(tip, text=self.tips[c], style="Hint.TLabel", justify=tk.LEFT, padding=px(self.tree, 6),
+                      relief="solid", borderwidth=1, wraplength=px(self.tree, 320)).pack()
+            self.tip = tip
+        except tk.TclError:
+            self.tip = None
+
+    def _hide(self):
+        if self._job is not None:
+            try:
+                self.tree.after_cancel(self._job)
+            except tk.TclError:
+                pass
+            self._job = None
+        if self.tip is not None:
+            try:
+                self.tip.destroy()
+            except tk.TclError:
+                pass
+            self.tip = None
+        self.col = None
 
 
 def green_button(parent, text: str, command, **kw) -> ttk.Button:

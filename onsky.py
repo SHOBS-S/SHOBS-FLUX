@@ -41,6 +41,7 @@ from __future__ import annotations
 import copy
 import math
 import os
+import re
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -109,6 +110,20 @@ SCALE_REASON = {SCALE_CAMERA: "an older SHOBS-P log, before 2.3.0", SCALE_LOG_LO
                 SCALE_LOG_LUM: "a clear (CV) luminance scale, ~0.1 mag faint"}
 
 
+# ---- star names ------------------------------------------------------------------------------------------------------
+
+def name_key(name) -> str:
+    """A star's name as FLUX compares it (0.6.0): case, spaces, underscores and hyphens do not count, so "HD219134",
+    "HD 219134" and "hd-219134" are one star (SHOBS-P, the capture program's OBJECT and the catalogs spell catalog
+    names differently). Signs and points still count ("BD+39 4529", "TOI 1234.01"). Shown names are never changed."""
+    return re.sub(r"[\s_\-]+", "", str(name or "")).casefold()
+
+
+def same_name(a, b) -> bool:
+    """Two star names are the same star (name_key)."""
+    return bool(name_key(a)) and name_key(a) == name_key(b)
+
+
 # ---- one night as FLUX sees it --------------------------------------------------------------------------------------
 
 @dataclass
@@ -144,7 +159,7 @@ class Dataset:
     flux: np.ndarray                    # frames × stars, log units (NaN = not measured)
     peak: np.ndarray                    # frames × stars, raw ADU
     segment: np.ndarray = None          # per frame: '' or 'flip' (SHOBS-P marks the frames after a meridian flip)
-    cadence: dict | None = None         # a FLUX folder run's time between ALL its lights (it may measure every Nth)
+    cadence: dict | None = None         # a FLUX folder run's time between ALL its lights (it may measure only some)
     catalog_service: str = ""           # where the catalog magnitudes came from (a FLUX folder run says)
     frames_are: str = "photometry"      # "photometry" or "imaging" (a FLUX folder run of astrophotography lights)
     n_frames_in_log: int = 0
@@ -155,6 +170,7 @@ class Dataset:
     scale: str = SCALE_CAMERA           # what the electron scale rests on (SCALE_* above)
     scale_note: str = ""                # in words, when the scale needs a caveat
     log_version: int = 1                # the log's format_version
+    star_sky: np.ndarray | None = None  # frames × stars: the sky in the ring around each star (FLUX folder runs)
 
     @property
     def scale_exact(self) -> bool:
@@ -174,9 +190,24 @@ class Dataset:
         e = self.star_e()
         return None if e is None else self.flux * e
 
+    def noise_sky_e(self) -> np.ndarray | None:
+        """Frames × stars: the sky's electrons per measured pixel AROUND EACH STAR, for the noise terms (0.6.0): the
+        star's own ring level when the log has it (a FLUX folder run), else the frame's sky, times the electrons per
+        unit AT that star (SHOBS-P 2.3.0 logs: the master flat's factor there, which moves ±8 % across a field) instead
+        of the frame's median. A sky that is not measurable (null: too close to the bias) counts as none. The zero
+        point does not use this."""
+        e = self.star_e()
+        if e is None:
+            return None
+        sky = np.broadcast_to(self.sky[:, None], self.flux.shape).astype(float)
+        if self.star_sky is not None and self.star_sky.shape == sky.shape:
+            sky = np.where(np.isfinite(self.star_sky), self.star_sky, sky)
+        sky = np.where(np.isfinite(sky), np.abs(sky), 0.0)
+        return sky * np.where(np.isfinite(e), e, self.e_per_unit if self.e_per_unit else np.nan)
+
     @property
     def key(self) -> tuple:
-        return (self.night, sp.slug(self.target), self.band, self.camera_id)
+        return (self.night, name_key(self.target), self.band, self.camera_id)
 
     @property
     def label(self) -> str:
@@ -357,12 +388,18 @@ def load_dataset(path_or_doc, cam_lookup=None, path: str = "") -> Dataset:
 
     stars = doc.get("stars") or []
     names, cats = [], []
+    # the target is always left out, also when a field star is the target spelled another way ("HD 219134" for
+    # "HD219134"); a star listed twice under two spellings counts once
+    skip = {name_key(doc.get("target"))} | {name_key(s.get("name")) for s in stars
+                                            if isinstance(s, dict) and s.get("role") == "target"}
+    skip.discard("")
     for s in stars:
         if not isinstance(s, dict) or s.get("role") == "target":
             continue
         m = _f(s.get("catalog_mag"))
-        if m is None or not s.get("name"):
+        if m is None or not s.get("name") or name_key(s["name"]) in skip:
             continue
+        skip.add(name_key(s["name"]))
         names.append(str(s["name"]))
         cats.append(m)
     frames_in = [f for f in (doc.get("frames") or []) if isinstance(f, dict)]
@@ -372,17 +409,20 @@ def load_dataset(path_or_doc, cam_lookup=None, path: str = "") -> Dataset:
     nf, ns = len(keep), len(names)
     flux = np.full((nf, ns), np.nan)
     peak = np.full((nf, ns), np.nan)
-    idx = {n: i for i, n in enumerate(names)}
+    idx = {name_key(n): i for i, n in enumerate(names)}       # a frame may spell a star another way
     e_star = np.full((nf, ns), np.nan) if log_scale else None
+    star_sky = np.full((nf, ns), np.nan)
     for fi, fr in enumerate(keep):
         for n, m in (fr.get("stars") or {}).items():
-            j = idx.get(n)
+            j = idx.get(name_key(n))
             if j is None or not isinstance(m, dict):
                 continue
             v = _f(m.get("flux"))
             flux[fi, j] = v if v is not None else np.nan
             p = _f(m.get("peak_adu"))
             peak[fi, j] = p if p is not None else np.nan
+            q = _f(m.get("sky"))
+            star_sky[fi, j] = q if q is not None else np.nan
             if e_star is not None:
                 e = _f(m.get("e_per_unit"))
                 e_star[fi, j] = e if e is not None and e > 0 else np.nan
@@ -447,7 +487,8 @@ def load_dataset(path_or_doc, cam_lookup=None, path: str = "") -> Dataset:
         segment=np.array([str(f.get("segment") or "") for f in keep], dtype=object),
         cadence=doc.get("cadence") if isinstance(doc.get("cadence"), dict) else None,
         catalog_service=str(doc.get("catalog_service") or ""), n_frames_in_log=len(frames_in), precalibrated=pre,
-        e_star=e_star, raw_sum_px=per_unit_px, scale=scale, scale_note=scale_note, log_version=log_version)
+        e_star=e_star, raw_sum_px=per_unit_px, scale=scale, scale_note=scale_note, log_version=log_version,
+        star_sky=star_sky if np.isfinite(star_sky).any() else None)
     # imaging focus (guided astrophotography) is said only by a FLUX folder run; SHOBS-P's logs are photometry
     if ds.source == "SHOBS-FLUX" and str(doc.get("frames_are") or "").lower() == "imaging":
         ds.frames_are = "imaging"
@@ -878,12 +919,12 @@ def _expected_mag_noise(ds: Dataset) -> np.ndarray:
     if ds.e_per_unit is None or not n:
         return np.full(n, np.nan)
     e = ds.star_electrons()
-    sky_e = ds.sky * ds.e_per_unit
+    sky_e = ds.noise_sky_e()                     # the sky around each star (0.6.0), not the frame's median
     npix = math.pi * (ds.aperture_px or 8.0) ** 2
     raw_per_px = ds.raw_sum_px
     rn2 = (ds.read_noise_e or 0.0) ** 2 * raw_per_px
     with np.errstate(divide="ignore", invalid="ignore"):
-        rel = np.sqrt(np.abs(e) + npix * (np.abs(sky_e)[:, None] + rn2)) / e
+        rel = np.sqrt(np.abs(e) + npix * (sky_e + rn2)) / e
     rel = np.where(e > 0, rel, np.nan)
     return MAG * np.nanmedian(rel, axis=0) if np.isfinite(rel).any() else np.full(n, np.nan)
 
@@ -907,7 +948,7 @@ def _seeing(res: NightResult) -> None:
 def _cadence(res: NightResult) -> None:
     ds = res.ds
     if ds.cadence is not None or ds.source == "SHOBS-FLUX":
-        # a folder run may measure only every Nth light: its frames' spacing says nothing; it wrote the spacing of
+        # a folder run may measure only runs of its lights: its frames' spacing says less; it wrote the spacing of
         # all its lights instead
         c = ds.cadence or {}
         iv, ex, n = _f(c.get("interval_s")), _f(c.get("exptime_s")), int(_f(c.get("n")) or 0)
@@ -963,12 +1004,18 @@ def _scintillation(res: NightResult, zp, good, aperture_m: float, elevation_m: f
     t = ds.exptime[order]
     x = ds.airmass[order]
     e_flux = ds.star_electrons()[order][:, good]                          # electrons in the aperture
-    sky_e = ds.sky[order] * ds.e_per_unit                                 # electrons per measured pixel
+    sky_e = ds.noise_sky_e()[order][:, good]                              # e⁻ per measured pixel around each star
     npix = math.pi * (ds.aperture_px or 8.0) ** 2
     raw_per_px = ds.raw_sum_px                                            # raw pixels summed per measured pixel
     rn2 = (ds.read_noise_e or 0.0) ** 2 * raw_per_px
     with np.errstate(divide="ignore", invalid="ignore"):
-        var_ph = (e_flux + npix * (sky_e[:, None] + rn2)) / e_flux ** 2  # relative variance per star per frame
+        var_ph = (e_flux + npix * (sky_e + rn2)) / e_flux ** 2           # relative variance per star per frame
+    # point-to-point differences only between TRUE neighbours: a gap (a meridian flip, clouds, or the gap between
+    # two runs of a large folder) of more than 2.5 × the usual spacing is not differenced across
+    gaps = np.diff(ds.jd[order])
+    near = np.isfinite(gaps) & (gaps > 0)
+    if near.sum() >= 2:
+        near &= gaps <= 2.5 * float(np.median(gaps[near]))
     m = zp[order][:, good]
     fac = scint_factor(aperture_m, t, x, elevation_m)                     # σ_scint / C_Y per frame
     est = []
@@ -977,7 +1024,7 @@ def _scintillation(res: NightResult, zp, good, aperture_m: float, elevation_m: f
         others = [k for k in range(n) if k != i]
         d = m[:, i] - np.nanmean(m[:, others], axis=1)
         dd = np.diff(d)
-        ok = np.isfinite(dd)
+        ok = np.isfinite(dd) & near
         if ok.sum() < 10:
             continue
         var_obs = (rsigma(dd[ok]) / MAG) ** 2 / 2.0                       # point-to-point: slow drifts cancel
@@ -1492,6 +1539,13 @@ def apply_to_profile(s: Summary, doc: dict | None, written_by: str, run_key: str
         for k in ("name", "aperture_mm"):
             if telescope and telescope.get(k) not in (None, "") and tel.get(k) in (None, ""):
                 tel[k] = telescope[k]
+        # what the frames' headers say is refreshed from these nights (0.6.0: it kept the first run's FOCALLEN and
+        # TELESCOP for ever); the profile's own focal length (its id) stays as it is
+        if telescope and sp._finite(telescope.get("focal_header")) is not None:
+            tel["focal_header"] = sp._finite(telescope.get("focal_header"))
+        if telescope and telescope.get("telescop_header"):
+            tel["telescop_header"] = telescope["telescop_header"]
+            tel["telescop_header_ignored"] = "mount name, not a telescope"
     bands, cad = measured_records(s, run_key)
     for band, recs in bands.items():
         slot = doc.setdefault("bands", {}).setdefault(band, {})

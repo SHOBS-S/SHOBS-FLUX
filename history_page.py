@@ -7,6 +7,7 @@ Middle: the trend plot (trend_plots.draw_trend). Bottom: the runs of this setup;
 (a bad night, a test) and put back: nothing is deleted."""
 from __future__ import annotations
 
+import json
 import os
 import re
 import tkinter as tk
@@ -116,6 +117,64 @@ def runs_for(setup: dict, removed: bool = False) -> list[dict]:
 KIND_WORDS = {"onsky": "night", "sky": "saved", "check": "check", "bench": "bench", "darks": "darks"}
 
 
+def _nights_words(nights: list) -> str:
+    nights = sorted({str(n) for n in nights if n})
+    if not nights:
+        return ""
+    if len(nights) == 1:
+        return f"night {nights[0]}"
+    return f"{len(nights)} nights, {nights[0]} to {nights[-1]}"
+
+
+def read_words(r: dict, runs: list | None = None) -> str:
+    """The "What it read" column. A night run: its on-sky log. A SAVED run (0.6.0): the log(s) and night(s) it
+    saved, like a night run ("…\\onsky\\2026-10-22__hd-219134__….json and 3 more logs · 4 nights, 2026-10-19 to
+    2026-10-22"), or the folder of lights and its night; a run saved by FLUX before 0.6.0 kept only the onsky folder:
+    the nights recorded with it (same setup, same minute) are named when there are any. runs: the rows on the page."""
+    src = str(r.get("source") or "")
+    if r.get("kind") != "sky":
+        return src
+    try:
+        summ = json.loads(r.get("summary") or "{}")
+    except (TypeError, ValueError):
+        summ = {}
+    summ = summ if isinstance(summ, dict) else {}
+    logs = [str(x) for x in (summ.get("logs") or []) if x]
+    nights = list(summ.get("night_list") or [])
+    folder_run = bool(src) and not src.lower().endswith(".json") and os.path.normcase(os.path.normpath(src)) != \
+        os.path.normcase(os.path.normpath(sp.onsky_dir(make=False)))
+    if not logs:                                       # saved before 0.6.0: the nights recorded with it
+        when = str(r.get("started") or "")[:16]
+        mine = [q for q in runs or [] if q.get("kind") == "onsky" and str(q.get("started") or "")[:16] == when
+                and q.get("system_id") == r.get("system_id")]
+        logs = [_base(q.get("source")) for q in mine if q.get("source")]
+        for q in mine:
+            try:
+                n = (json.loads(q.get("summary") or "{}") or {}).get("night")
+            except (TypeError, ValueError, AttributeError):
+                n = None
+            if n:
+                nights.append(n)
+        if not logs and not folder_run:
+            return (f"{src} (the on-sky logs of this setup; FLUX before 0.6.0 did not keep which ones; the nights "
+                    "it used are the night runs saved before it)")
+    nw = _nights_words(nights)
+    if folder_run:                                     # the lights folder, its own log, and the setup's other logs
+        own = next((x for x in logs if "__flux-" in x.lower()), "")
+        more = len([x for x in logs if x != own])
+        return (src + (f" (its log {own})" if own else "")
+                + (f" and {more} more log{'s' if more != 1 else ''}" if more > 0 else "") + (f" · {nw}" if nw else ""))
+    folder = os.path.dirname(src) if src.lower().endswith(".json") else (src or sp.onsky_dir(make=False))
+    first = logs[0] if logs else _base(src)
+    more = len(logs) - 1
+    return (os.path.join(folder, first) + (f" and {more} more log{'s' if more != 1 else ''}" if more > 0 else "")
+            + (f" · {nw}" if nw else ""))
+
+
+def _base(path) -> str:
+    return str(path or "").replace("\\", "/").rsplit("/", 1)[-1]
+
+
 class HistoryPage:
     title = "History"
 
@@ -189,8 +248,9 @@ class HistoryPage:
         bar.pack(fill=tk.X, pady=(px(app, 4), px(app, 2)))
         ttk.Label(bar, text="Runs of this setup", style="Section.TLabel").pack(side=tk.LEFT)
         self.removed_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(bar, text="Show runs taken off", variable=self.removed_var,
-                        command=self.show_runs).pack(side=tk.LEFT, padx=px(app, 12))
+        self.removed_box = ttk.Checkbutton(bar, text="Show runs taken off", variable=self.removed_var,
+                                           command=self.show_runs, style="Card.TCheckbutton")
+        self.removed_box.pack(side=tk.LEFT, padx=px(app, 12))
         self.restore_btn = ttk.Button(bar, text="Put back", command=lambda: self.take_off(False))
         self.restore_btn.pack(side=tk.RIGHT)
         self.remove_btn = ttk.Button(bar, text="Take off the page…", command=lambda: self.take_off(True))
@@ -426,12 +486,13 @@ class HistoryPage:
         if not st:
             self._buttons()
             return
-        for r in runs_for(st, removed=self.removed_var.get()):
+        rows = runs_for(st, removed=self.removed_var.get())
+        for r in rows:
             off = bool(r.get("removed"))
             status = ("(taken off)  " if off else "") + history.status_text(r)
             if r["kind"] == "onsky" and history.judged_by(r):
                 status += f"  (judged by FLUX {history.judged_by(r)})"
-            src = r.get("source") or ""
+            src = read_words(r, rows)
             if r.get("joined"):
                 src = f"{src}  ({r['joined']})"
             iid = tr.insert("", "end", values=(KIND_WORDS.get(r["kind"], r["kind"]),
