@@ -423,5 +423,23 @@ class TestReviewFixes(BenchCase):
         self.assertEqual(shobs_update.parse_version("SHOBS-FLUX v1.0.1"), (1, 0, 1, 0))
 
 
+class TestBrightLadderAnchor(BenchCase):
+    def test_bright_ladder_anchors_on_20_percent_and_says_so(self):
+        """27 Oct 2026: a ladder too bright for two pairs below 12 % in each pairing is anchored on 20 %."""
+        ex = [0.35, 0.7, 1.0, 1.3, 1.6, 1.9, 2.2, 2.6, 3.0, 3.4, 3.8, 4.2, 4.6]
+        r = self.run_ladder("bright20", exposures=ex)
+        self.assertEqual(r.ratio_anchor_pct, 20.0)
+        self.assertTrue(math.isfinite(r.ratio_limit_adu), r.ratio_why_not)
+        self.assertTrue(any("anchored on the dimmest 20 %" in t for _k, t in r.lines))
+        steady = self.run_ladder("steady")
+        self.assertAlmostEqual(r.ratio_limit_adu, steady.channels["G"].ladder_limit_adu, delta=5000)
+
+    def test_too_bright_to_anchor_says_why(self):
+        ex = [0.6, 0.9, 1.2, 1.5, 1.8, 2.2, 2.6, 3.0, 3.4, 3.8, 4.2, 4.6]
+        r = self.run_ladder("bright_none", exposures=ex)
+        self.assertTrue(math.isnan(r.ratio_limit_adu))
+        self.assertIn("shorter exposures", r.ratio_why_not)
+
+
 if __name__ == "__main__":
     unittest.main()

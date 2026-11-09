@@ -410,6 +410,7 @@ class BenchResult:
     ratio_how: str = ""
     ratio_why_not: str = ""                             # why the colour-ratio check could not be made
     ratio_noise_pct: float = float("nan")               # scatter of the ratio on the straight base (one pair)
+    ratio_anchor_pct: float = 12.0                      # the dimmest part of the range the ratio is anchored on
     light_steady: bool | None = None                    # None: no repeated exposure to tell
     worst_pair_pct: float = float("nan")                # the two frames of a pair: the largest disagreement, %
     unsteady_pairs: list = field(default_factory=list)  # exposures whose two frames disagree by > STEADY_PCT
@@ -1125,6 +1126,13 @@ def _ratio_linearity(res: BenchResult) -> None:
                              "panel, or paper over it) makes the check work")
         return
     combos = {(h, l) for _a, _b, h, l in rows}
+    # the anchor zone: the dimmest 12 % of the range, where the response is surely straight; a ladder too bright for
+    # two pairs there in every colour pairing (27 Oct 2026) is anchored on 20 % (a bend there is ~0.1 %), and says so.
+    # Never further up: a base that has begun to bend makes the whole curve soft (Fable review 1.0.0)
+    def n_dim(hc, lc, z):
+        return sum(1 for ok in allok if hc in ok and lc in ok and ok[hc].signal <= z * rng[hc])
+    zone = 0.12 if all(n_dim(h, l, 0.12) >= 2 for h, l in combos) else 0.20
+    res.ratio_anchor_pct = 100.0 * zone
     rho0, refs = {}, {}
     noise = []
     for hc, lc in combos:
@@ -1144,10 +1152,8 @@ def _ratio_linearity(res: BenchResult) -> None:
             tr = np.array([t for t, _v in r])
             vr = np.array([v for _t, v in r])
             return float(np.interp(a.t_mid, tr, vr) / np.mean(vr))
-        # the ratio's own value: from the dimmest pairs, where the response is surely straight (2–12 % of the range;
-        # the straight base, 2–30 %, when too few)
-        # (no fallback to a brighter base: where the response may already bend the curve comes out soft; Fable 1.0.0)
-        base = [b.signal / a.signal / drift(a) for a, b in these if a.signal <= 0.12 * rng[hc]]
+        # the ratio's own value: from the pairs in the anchor zone
+        base = [b.signal / a.signal / drift(a) for a, b in these if a.signal <= zone * rng[hc]]
         if len(base) >= 2:
             rho0[(hc, lc)] = (float(np.median(base)), drift)
             if len(base) >= 3:
@@ -1157,8 +1163,8 @@ def _ratio_linearity(res: BenchResult) -> None:
         res.ratio_noise_pct = float(np.median(noise))
     rows = [r for r in rows if (r[2], r[3]) in rho0]
     if not rows:
-        res.ratio_why_not = ("fewer than 2 pairs in the dimmest 12 % of the range to anchor the colour ratio on "
-                             "(shoot a few shorter exposures)")
+        res.ratio_why_not = (f"fewer than 2 pairs in the dimmest {100 * zone:.0f} % of the range to anchor the colour "
+                             "ratio on (shoot a few shorter exposures)")
         return
     rows.sort(key=lambda r: r[0].mean_raw)
     levels, devs = [], []
@@ -1167,9 +1173,9 @@ def _ratio_linearity(res: BenchResult) -> None:
         r0, drift = rho0[(hc, lc)]
         rho = b.signal / a.signal / drift(a) / r0                    # f(lo level) / f(hi level)
         direct = 100.0 * (rho - 1.0)
-        # f at the dimmer level: 1 in the anchor zone (the dimmest 12 % of the range, where the ratio's own value
+        # f at the dimmer level: 1 in the anchor zone (the dimmest 12 or 20 % of the range, where the ratio's own value
         # comes from), else from the points already found
-        if b.signal <= 0.12 * rng[lc]:
+        if b.signal <= zone * rng[lc]:
             d_lo = 0.0
         elif levels and b.mean_raw <= max(levels):
             d_lo = float(np.interp(b.mean_raw, levels, devs))
@@ -1192,6 +1198,10 @@ def _ratio_linearity(res: BenchResult) -> None:
             q["dev_pct"] = round(q["dev_pct"] - shift, 4)
         devs = [d - shift for d in devs]
     res.ratio_curve = curve
+    if not curve:
+        res.ratio_why_not = (f"the dimmest pairs start above {100 * zone:.0f} % of the range, so the colour ratio has "
+                             "nothing straight to anchor on (shoot a few shorter exposures)")
+        return
     above = [p for p in curve if not p["base"]]
     if len(above) < RATIO_MIN_POINTS:
         res.ratio_why_not = (f"only {len(above)} pair{'s' if len(above) != 1 else ''} above the straight base with "
@@ -1392,6 +1402,9 @@ def _findings(res: BenchResult, sc: Scan) -> None:
                 short="linear limit not found")
     if len(chans) == 3 and res.ratio_why_not:
         res.add("info", f"Colour-ratio check: not possible ({res.ratio_why_not}).")
+    elif res.ratio_curve and res.ratio_anchor_pct > 12.0:
+        res.add("info", f"The colour ratio is anchored on the dimmest {res.ratio_anchor_pct:.0f} % of the range (too few "
+                        "pairs below 12 %); a few shorter exposures would anchor it lower.")
     if math.isfinite(res.t_offset):
         sig = res.t_offset_sigma if math.isfinite(res.t_offset_sigma) else 0.0
         if not res.offset_trusted:
