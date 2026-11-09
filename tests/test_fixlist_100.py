@@ -222,5 +222,159 @@ class TestShootingPlan(unittest.TestCase):
         self.assertIn("panel OFF", text)
 
 
+# ---- 6: GitHub #2, the new-version check -----------------------------------------------------------------------------
+
+import io
+import json as _json
+
+import shobs_update
+
+
+class _Resp(io.BytesIO):
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def _opener(doc=None, exc=None):
+    def op(req, timeout=None):
+        op.seen = (req.full_url, dict(req.header_items()), timeout)
+        if exc:
+            raise exc
+        return _Resp(_json.dumps(doc).encode())
+    return op
+
+
+class TestUpdateCheck(unittest.TestCase):
+    REL = {"tag_name": "v1.0.1", "html_url": "https://github.com/SHOBS-S/SHOBS-FLUX/releases/tag/v1.0.1",
+           "name": "SHOBS-FLUX v1.0.1", "draft": False, "prerelease": False}
+
+    def test_versions(self):
+        self.assertEqual(shobs_update.parse_version("v2.3.2"), (2, 3, 2, 0))
+        self.assertTrue(shobs_update.is_newer("v1.0.1", "1.0.0"))
+        self.assertTrue(shobs_update.is_newer("v1.10.0", "1.9.9"))
+        self.assertFalse(shobs_update.is_newer("v1.0.0", "1.0.0"))
+        self.assertFalse(shobs_update.is_newer("v0.6.1", "1.0.0"))
+        self.assertFalse(shobs_update.is_newer("nightly", "1.0.0"))
+
+    def test_fetch_asks_the_public_api_only(self):
+        op = _opener(self.REL)
+        got = shobs_update.fetch_latest("SHOBS-S/SHOBS-FLUX", "SHOBS-FLUX/1.0.0", opener=op)
+        self.assertEqual(got["tag"], "v1.0.1")
+        url, headers, timeout = op.seen
+        self.assertEqual(url, "https://api.github.com/repos/SHOBS-S/SHOBS-FLUX/releases/latest")
+        self.assertNotIn("Authorization", headers)
+        self.assertEqual(timeout, shobs_update.TIMEOUT_S)
+
+    def test_silent_on_errors_drafts_and_prereleases(self):
+        import urllib.error
+        for op in (_opener(exc=urllib.error.URLError("offline")), _opener(exc=TimeoutError()),
+                   _opener(exc=urllib.error.HTTPError("u", 403, "rate limit", {}, None)),
+                   _opener(dict(self.REL, draft=True)), _opener(dict(self.REL, prerelease=True)),
+                   _opener({"message": "Not Found"}), _opener(dict(self.REL, html_url="https://evil.example/x"))):
+            self.assertIsNone(shobs_update.fetch_latest("SHOBS-S/SHOBS-FLUX", opener=op))
+
+    def test_note_and_once_a_day(self):
+        calls = []
+
+        def fetch():
+            calls.append(1)
+            return {"tag": "v1.0.1", "url": self.REL["html_url"], "name": "x"}
+        st = {"check_updates": True}
+        note = shobs_update.check("SHOBS-FLUX", "S", "1.0.0", st, now=1000.0, fetch=fetch)
+        self.assertEqual(note["text"], "SHOBS-FLUX 1.0.1 is available — see the release notes")
+        self.assertNotIn("⚠", note["text"])                         # a plain note (house rule)
+        self.assertEqual(st["update_tag"], "v1.0.1")
+        again = shobs_update.check("SHOBS-FLUX", "S", "1.0.0", st, now=1000.0 + 3600, fetch=fetch)
+        self.assertEqual(len(calls), 1)                              # within a day: the kept answer
+        self.assertEqual(again["text"], note["text"])                # shown again at each start
+        shobs_update.check("SHOBS-FLUX", "S", "1.0.0", st, now=1000.0 + 90000, fetch=fetch)
+        self.assertEqual(len(calls), 2)
+        self.assertIsNone(shobs_update.check("SHOBS-FLUX", "S", "1.0.1", st, now=1000.0 + 90001, fetch=fetch))
+
+    def test_failed_question_keeps_old_answer_and_asks_next_time(self):
+        st = {"update_checked_at": 0.0, "update_tag": "v1.0.1", "update_url": self.REL["html_url"]}
+        note = shobs_update.check("SHOBS-FLUX", "S", "1.0.0", st, now=200000.0, fetch=lambda: None)
+        self.assertIsNotNone(note)
+        self.assertEqual(st["update_checked_at"], 0.0)
+
+    def test_switched_off(self):
+        st = {"check_updates": False}
+        self.assertIsNone(shobs_update.check("SHOBS-FLUX", "S", "1.0.0", st, fetch=lambda: 1 / 0))
+
+
+# ---- 6–7 in the window -------------------------------------------------------------------------------------------------
+
+try:
+    import tkinter as _tk
+    _r = _tk.Tk()
+    _r.destroy()
+    HAVE_TK = True
+except Exception:
+    HAVE_TK = False
+
+
+@unittest.skipUnless(HAVE_TK, "needs a display (run under xvfb-run)")
+class TestWindow(TempData):
+    def setUp(self):
+        super().setUp()
+        from tests import m5_data
+        self.d = m5_data.make(self.tmp)
+        import flux_app
+        self.app = flux_app.App(testing=True)
+        self.app.update()
+
+    def tearDown(self):
+        try:
+            self.app.destroy()
+        except Exception:
+            pass
+        self.app = None
+        import gc
+        gc.collect()
+        super().tearDown()
+
+    def test_update_note_stays_beside_other_messages(self):
+        app = self.app
+        self.assertEqual(app.update_var.get(), "")                    # the tests never ask GitHub
+        app.show_update({"text": "SHOBS-FLUX 1.0.1 is available — see the release notes", "tag": "v1.0.1",
+                         "url": "https://github.com/SHOBS-S/SHOBS-FLUX/releases/tag/v1.0.1"})
+        app.set_status("✔ Something else happened.")
+        self.assertIn("1.0.1 is available", app.update_var.get())
+        self.assertEqual(str(app.update_label.cget("style")), "StatusLink.TLabel")
+
+    def test_checkbox_on_credits(self):
+        import settings
+        app = self.app
+        app.show_credits()
+        cp = app.credits_page
+        self.assertTrue(cp.check_var.get())
+        cp.check_var.set(False)
+        cp.set_check()
+        self.assertFalse(settings.load()["check_updates"])
+        cp.check_var.set(True)
+        cp.set_check()
+        self.assertTrue(settings.load()["check_updates"])
+
+    def test_history_status_in_full(self):
+        app = self.app
+        app.geometry("1000x700")
+        app.show_page(4)
+        app.update()
+        hp = app.history_page
+        self.assertTrue(hp.run_rows)
+        long = "⚠ Not photometric: the zero point wandered 0.12 mag through the night (thin cloud?) " * 2
+        iid = next(iter(hp.run_rows))
+        hp.tree.set(iid, "status", long)
+        hp._fit_status()
+        app.update()
+        self.assertGreater(int(hp.tree.column("status", "width")), 330)
+        hp.tree.selection_set(iid)
+        app.update()
+        self.assertIn(long.strip()[:60], hp.detail_var.get())
+
+
 if __name__ == "__main__":
     unittest.main()

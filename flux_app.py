@@ -935,6 +935,10 @@ class CreditsPage:
         head = ttk.Frame(self.frame, style="Card.TFrame")
         head.pack(fill=tk.X, pady=(0, px(app, 8)))
         ttk.Label(head, text=f"SHOBS-FLUX {settings.APP_VERSION}   {cr.COPYRIGHT}", style="Bold.TLabel").pack(anchor="w")
+        self.check_var = tk.BooleanVar(value=bool(app.prefs.get("check_updates", True)))
+        ttk.Checkbutton(head, text="Check for new versions at start (asks GitHub once a day; never downloads "
+                                   "anything)", variable=self.check_var, style="Card.TCheckbutton",
+                        command=self.set_check).pack(anchor="w", pady=(px(app, 2), px(app, 2)))
         lic = ttk.Label(head, text=cr.LICENSE_LINE, style="Card.TLabel", justify=tk.LEFT)
         lic.pack(anchor="w", fill=tk.X)
         follow_wrap(lic, head, px(app, 10))
@@ -957,6 +961,12 @@ class CreditsPage:
 
     def refresh(self):
         pass
+
+    def set_check(self):
+        self.app.prefs["check_updates"] = bool(self.check_var.get())
+        settings.save(self.app.prefs)
+        if not self.check_var.get():
+            self.app.update_var.set("")
 
     def back(self):
         self.app.show_page(self.app.page_index if self.app.page_index is not None else 0)
@@ -998,6 +1008,27 @@ class App(tk.Tk):
         self.set_status(f"✖ The shared profile code failed its own check ({', '.join(bad)})." if bad else
                         f"Data folder: {sp.data_dir()}")
         settings.log(f"opened {settings.WRITTEN_BY}")
+        if not testing:
+            self.check_for_update()
+
+    def check_for_update(self):
+        """GitHub SHOBS-FLUX #2: ask, in the background, whether a newer release is out (once a day at most)."""
+        import shobs_update
+        shobs_update.start(self, settings.APP_NAME, settings.REPO, settings.APP_VERSION, self.prefs, settings.save,
+                           self.show_update)
+
+    def show_update(self, note: dict):
+        self.update_url = note.get("url") or ""
+        self.update_var.set(note.get("text") or "")
+        settings.log(f"new version: {note.get('tag')} ({self.update_url})")
+
+    def open_release(self):
+        if self.update_url:
+            import webbrowser
+            try:
+                webbrowser.open(self.update_url)
+            except Exception:
+                pass
 
     def _set_window_icon(self):
         ico = os.path.join(APP_DIR, "shobs_flux.ico")
@@ -1047,6 +1078,12 @@ class App(tk.Tk):
         self.busy_bar = style.BusyBar(row, label_style="Status.TLabel", frame_style="Status.TFrame",
                                       bar_style="Status.Horizontal.TProgressbar")
         self.busy_bar.pack(side=tk.LEFT)
+        # a newer release (shobs_update.py): its own note at the right, so other messages never wipe it
+        self.update_var = tk.StringVar(value="")
+        self.update_url = ""
+        self.update_label = ttk.Label(row, textvariable=self.update_var, style="StatusLink.TLabel", cursor="hand2")
+        self.update_label.pack(side=tk.RIGHT, anchor="e", padx=(px(self, 10), 0))
+        self.update_label.bind("<Button-1>", lambda _e: self.open_release())
         self.status_label = ttk.Label(row, textvariable=self.status_var, style="Status.TLabel", anchor="w")
         self.status_label.pack(side=tk.LEFT, anchor="w", fill=tk.X, expand=True)
         line = ttk.Label(status, text=cr.STATUS_LINE, style="Status.TLabel", foreground=style.SIDE_HINT)

@@ -265,9 +265,16 @@ class HistoryPage:
         self.tree.tag_configure("off", foreground="#9aa7b0")
         vb = ttk.Scrollbar(tf, orient=tk.VERTICAL, command=self.tree.yview)
         self.tree.configure(yscrollcommand=vb.set)
+        # the selected run in full, wrapped (a list row cannot wrap; 1.0.0: long statuses were cut off)
+        self.detail_var = tk.StringVar(value="")
+        self.detail = ttk.Label(lower, textvariable=self.detail_var, style="Hint.TLabel", justify=tk.LEFT)
+        self.detail.pack(side=tk.BOTTOM, anchor="w", fill=tk.X, pady=(px(app, 4), 0))
+        from flux_app import follow_wrap
+        follow_wrap(self.detail, lower, px(app, 10))
         vb.pack(side=tk.RIGHT, fill=tk.Y)
         self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.tree.bind("<<TreeviewSelect>>", lambda _e: self._buttons())
+        self.tree.bind("<Configure>", lambda _e: self._fit_status())
 
     # ---- what is shown
     def say(self, text: str):
@@ -499,11 +506,34 @@ class HistoryPage:
                                                str(r["started"])[:16].replace("T", " "), status, src),
                             tags=("off",) if off else ())
             self.run_rows[iid] = r
+        self._fit_status()
         self._buttons()
+
+    def _fit_status(self):
+        """The Status column as wide as its longest entry, up to 60 % of the list (What it read gives way)."""
+        from tkinter import font as tkfont
+        try:
+            f = tkfont.nametofont("TkDefaultFont")
+            longest = max((f.measure(str(self.tree.set(i, "status"))) for i in self.tree.get_children()), default=0)
+            total = self.tree.winfo_width()
+            if total <= 1:
+                return
+            fixed = int(self.tree.column("kind", "width")) + int(self.tree.column("when", "width"))
+            want = longest + px(self.app, 24)
+            status_w = max(px(self.app, 200), min(want, int(0.6 * total)))
+            self.tree.column("status", width=status_w)
+            self.tree.column("source", width=max(px(self.app, 150), total - fixed - status_w - 4))
+        except (tk.TclError, ValueError):
+            pass
 
     def _buttons(self):
         sel = self.tree.selection()
         r = self.run_rows.get(sel[0]) if sel else None
+        if r is not None and sel:
+            vals = self.tree.item(sel[0], "values")
+            self.detail_var.set(f"{vals[1]}  {vals[0]}:  {vals[2]}\nRead: {vals[3]}" if len(vals) >= 4 else "")
+        else:
+            self.detail_var.set("Pick a run to see its status and what it read in full." if self.run_rows else "")
         self.remove_btn.state(["!disabled"] if r and not r.get("removed") else ["disabled"])
         self.restore_btn.state(["!disabled"] if r and r.get("removed") else ["disabled"])
 

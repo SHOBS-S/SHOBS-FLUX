@@ -865,7 +865,8 @@ def _write(info, tmp, share, version, pages, new_page, table, tel, cam, mode, tr
             frac = _f(lin.get("measured_to_fraction_of_full_scale"))
             p.para(f"Linearity: within {lin['max_deviation_pct']:g} %"
                    + (f" up to {frac * 100:.0f} % of full scale" if frac is not None else "")
-                   + f" ({lin.get('source')}, {lin.get('date')}).")
+                   + f" ({lin.get('source')}" + (f", {lin['method']}" if lin.get("method") else "")
+                   + f", {lin.get('date')}).")
         p.done()
 
         # 3 on sky, one page per band

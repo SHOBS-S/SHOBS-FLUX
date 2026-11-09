@@ -17,7 +17,8 @@ APP_TITLE = "Shiloh Hill Observatory – Optical System Characterization (SHOBS-
 APP_VERSION = "0.6.1"          # milestone builds 0.1–0.6; 1.0.0 at release (John, 27 Oct 2026)
 WRITTEN_BY = f"{APP_NAME} {APP_VERSION}"
 
-DEFAULTS = {"last_folder": "", "header_answers": {}}
+DEFAULTS = {"last_folder": "", "header_answers": {}, "check_updates": True}
+REPO = "SHOBS-S/SHOBS-FLUX"     # GitHub: releases, and the new-version check (shobs_update.py)
 
 
 def settings_path() -> str:
