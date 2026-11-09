@@ -1135,7 +1135,11 @@ def _ratio_linearity(res: BenchResult) -> None:
             tr = np.array([t for t, _v in r])
             vr = np.array([v for _t, v in r])
             return float(np.interp(a.t_mid, tr, vr) / np.mean(vr))
-        base = [b.signal / a.signal / drift(a) for a, b in these if a.signal <= 0.30 * rng[hc]]
+        # the ratio's own value: from the dimmest pairs, where the response is surely straight (2–12 % of the range;
+        # the straight base, 2–30 %, when too few)
+        base = [b.signal / a.signal / drift(a) for a, b in these if a.signal <= 0.12 * rng[hc]]
+        if len(base) < 2:
+            base = [b.signal / a.signal / drift(a) for a, b in these if a.signal <= 0.30 * rng[hc]]
         if len(base) >= 2:
             rho0[(hc, lc)] = (float(np.median(base)), drift)
             if len(base) >= 3:
@@ -1151,22 +1155,30 @@ def _ratio_linearity(res: BenchResult) -> None:
         r0, drift = rho0[(hc, lc)]
         rho = b.signal / a.signal / drift(a) / r0                    # f(lo level) / f(hi level)
         direct = 100.0 * (rho - 1.0)
-        if a.signal <= 0.30 * rng[hc]:
-            d = 0.0                                                  # the straight base: f = 1 by definition
+        # f at the dimmer level: 1 in the anchor zone (the dimmest 12 % of the range, where the ratio's own value
+        # comes from), else from the points already found
+        if b.signal <= 0.12 * rng[lc]:
+            d_lo = 0.0
+        elif b.mean_raw <= max(levels):
+            d_lo = float(np.interp(b.mean_raw, levels, devs))
         else:
-            if b.signal <= 0.30 * rng[lc]:
-                d_lo = 0.0
-            elif levels and b.mean_raw <= max(levels):
-                d_lo = float(np.interp(b.mean_raw, levels, devs))
-            else:
-                continue                                             # the dimmer level is not on the curve yet
-            d = 100.0 * ((1.0 + d_lo / 100.0) / rho - 1.0)
+            continue                                                 # the dimmer level is not on the curve yet
+        d = 100.0 * ((1.0 + d_lo / 100.0) / rho - 1.0)
         # keep the curve's points sorted by level for np.interp
         i = int(np.searchsorted(levels, a.mean_raw))
         levels.insert(i, a.mean_raw)
         devs.insert(i, d)
         curve.append({"level": round(a.mean_raw, 1), "dev_pct": round(d, 4), "direct_pct": round(direct, 4),
-                      "hi": hc, "lo": lc, "exptime": a.exptime, "t": a.t_mid, "base": a.signal <= 0.30 * rng[hc]})
+                      "hi": hc, "lo": lc, "exptime": a.exptime, "t": a.t_mid,
+                      "base": 0.02 * rng[hc] <= a.signal <= 0.30 * rng[hc]})
+    # measured against the straight base like the time ladder (whose line is fitted on 2–30 %): the curve is moved so
+    # the base averages zero, so a bend that has already begun inside the base counts as it does there
+    on_base = [q["dev_pct"] for q in curve if q["base"]]
+    if on_base:
+        shift = float(np.mean(on_base))
+        for q in curve:
+            q["dev_pct"] = round(q["dev_pct"] - shift, 4)
+        devs = [d - shift for d in devs]
     res.ratio_curve = curve
     above = [p for p in curve if not p["base"]]
     if len(above) < RATIO_MIN_POINTS:

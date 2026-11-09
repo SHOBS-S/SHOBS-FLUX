@@ -67,11 +67,15 @@ DEFAULT_EXPOSURES = (0.05, 0.1, 0.2, 0.3, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0, 5.
 def make_ladder(folder: str, shape=(256, 320), gain=0.25, read_noise=1.4, bias=500.0, full_well=15000.0,
                 nonlin=0.03, t_offset=0.0, bayer: str | None = "RGGB", adc_bits=16, rates=None,
                 exposures=DEFAULT_EXPOSURES, bias_pairs=5, drift_per_frame=0.0, lit_bias: float = 0.0, lit_white: bool = False,
-                seed=7, instrume="Synthetic Bench Cam") -> dict:
+                seed=7, instrume="Synthetic Bench Cam", color_drift: dict | None = None, jumps: dict | None = None,
+                frame_jitter: float = 0.0) -> dict:
     """Write a bias + flat-pair ladder into folder (ASIAIR-like names). Returns what went in. drift_per_frame: the
     panel's fractional change per frame shot (0.001 = 0.1 % per frame). lit_bias: e⁻/s/px of panel light leaking
     into the 'bias' frames (shot at 1 ms with the panel on), as on 27 Oct: in the flats' colors (the panel), or the same
-    in every color (lit_white=True: room light)."""
+    in every color (lit_white=True: room light). 1.0.0, an unsteady panel like 9 Nov 2026's: color_drift {color: extra
+    fractional change per frame} (the panel's colour drifting as it warms); jumps {index in exposures: factor} (the
+    light stepping at one rung, in every colour alike); frame_jitter: the light's random change from one frame to
+    the next (fraction, Gaussian). An exposure listed more than once is a reference (drift) exposure."""
     os.makedirs(folder, exist_ok=True)
     rng = np.random.default_rng(seed)
     if rates is None:
@@ -99,10 +103,15 @@ def make_ladder(folder: str, shape=(256, 320), gain=0.25, read_noise=1.4, bias=5
         else:
             lr = {k: 0.0 for k in rates}
         put("bias", t_b, flat_frame(shape, lr, t_b, t_offset=0.0, rng=rng, **common), i + 1)
-    for t in exposures:
+    seen: dict = {}
+    for k, t in enumerate(exposures):
+        seen[t] = seen.get(t, 0) + 1
         for i in range(2):
-            scale = 1.0 + drift_per_frame * n
-            put("flat", t, flat_frame(shape, rates, t, t_offset=t_offset, light_scale=scale, rng=rng, **common),
-                i + 1)
+            scale = (1.0 + drift_per_frame * n) * (jumps or {}).get(k, 1.0)
+            if frame_jitter:
+                scale *= 1.0 + rng.normal(0.0, frame_jitter)
+            r = {c: v * (1.0 + (color_drift or {}).get(c, 0.0) * n) for c, v in rates.items()}
+            put("flat", t, flat_frame(shape, r, t, t_offset=t_offset, light_scale=scale, rng=rng, **common),
+                2 * (seen[t] - 1) + i + 1)
     return {"gain": gain, "read_noise": read_noise, "bias": bias, "full_well": full_well, "nonlin": nonlin,
             "t_offset": t_offset, "bayer": bayer, "adc_bits": adc_bits, "rates": rates, "exposures": list(exposures)}
