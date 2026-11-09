@@ -68,5 +68,159 @@ class TestFolderRunReadNoise(TempData):
         self.assertTrue(np.any(e2[ok] > e1[ok] * 1.001))
 
 
+# ---- 2–5: the bench and the light -------------------------------------------------------------------------------------
+
+import math
+import os
+
+import bench
+import synth_bench
+
+REF = 2.0
+LADDER = ([REF] + [0.1, 0.2, 0.4, 0.6, 0.8, 1.0, 1.2, 1.4, 1.6, 1.8] + [REF] +
+          [2.2, 2.4, 2.6, 2.8, 3.0, 3.2, 3.4, 3.6, 3.8, 4.2, 4.6] + [REF])
+RATES = {"R": 2800.0, "G": 4000.0, "B": 2000.0}               # a warm light: green brightest, blue half of it
+UNSTEADY = dict(drift_per_frame=0.002, color_drift={"R": 0.0005, "B": -0.0004}, jumps={8: 0.985, 14: 1.012},
+                frame_jitter=0.002)
+
+
+class BenchCase(TempData):
+    _cache: dict = {}
+
+    def run_ladder(self, key, **kw):
+        if key in BenchCase._cache:
+            return BenchCase._cache[key]
+        kw.setdefault("exposures", LADDER)
+        kw.setdefault("rates", RATES)
+        kw.setdefault("nonlin", 0.03)
+        folder = self.path(key)
+        synth_bench.make_ladder(folder, shape=(200, 240), **kw)
+        res = bench.run_bench(folder)
+        BenchCase._cache[key] = res
+        return res
+
+
+class TestColourRatio(BenchCase):
+    def test_steady_light_both_methods_agree(self):
+        r = self.run_ladder("steady")
+        self.assertTrue(r.light_steady)
+        self.assertTrue(math.isfinite(r.ratio_limit_adu))
+        self.assertAlmostEqual(r.ratio_limit_adu, r.channels["G"].ladder_limit_adu, delta=3500)   # one rung
+        # the ratio curve follows the time ladder's bend where both see it
+        g = {round(p.mean_raw): p.deviation_pct for p in r.channels["G"].pairs if not p.saturated}
+        diff = [q["dev_pct"] - g[round(q["level"])] for q in r.ratio_curve
+                if q["hi"] == "G" and q["level"] > 35000 and round(q["level"]) in g]
+        self.assertGreaterEqual(len(diff), 5)
+        self.assertLess(abs(float(np.median(diff))), 0.15)          # small frames: each point is noisy, not biased
+        self.assertLess(max(abs(x) for x in diff), 0.5)
+        self.assertTrue(r.offset_trusted)
+
+    def test_unsteady_light_ratio_decides(self):
+        steady = self.run_ladder("steady")
+        r = self.run_ladder("unsteady", **UNSTEADY)
+        self.assertIs(r.light_steady, False)
+        self.assertEqual(r.lin_method, "colour ratio")
+        truth = steady.channels["G"].ladder_limit_adu
+        self.assertAlmostEqual(r.linear_limit_adu, truth, delta=3500)                 # within a rung of the truth
+        self.assertLess(r.channels["G"].ladder_limit_adu, truth - 3000)               # the light fooled the ladder
+        for c in "RGB":
+            self.assertEqual(r.channels[c].linear_limit_adu, r.linear_limit_adu)      # one curve for the sensor
+        self.assertFalse(r.offset_trusted)
+        text = " ".join(t for _k, t in r.lines)
+        self.assertIn("The light was not steady", text)
+        self.assertIn("from the colour ratio" if r.linear_is_bound else "colour ratio:", text)
+        self.assertFalse(any(k == "warn" and "light" in t.lower() for k, t in r.lines))   # plain note: result fine
+        vals, _per, lin = bench.measured_records(r)
+        self.assertNotIn("exposure_offset_s", vals)
+        self.assertEqual(lin["method"], "colour ratio")
+        self.assertIn("time_ladder_curve_adu", lin)
+        self.assertIn("colour ratio", vals["linear_limit_adu"]["note"])
+
+    def test_linear_sensor_in_unsteady_light_is_linear_to_the_top(self):
+        r = self.run_ladder("unsteady_linear", nonlin=0.0, drift_per_frame=0.002, color_drift={"R": 0.0005},
+                            jumps={8: 0.985}, frame_jitter=0.002)
+        self.assertEqual(r.lin_method, "colour ratio")
+        self.assertTrue(r.linear_is_bound)
+        self.assertGreater(r.linear_limit_adu, 55000)
+
+    def test_neutral_light_falls_back_to_the_time_ladder(self):
+        r = self.run_ladder("neutral", rates={"R": 4000.0, "G": 4000.0, "B": 3900.0})
+        self.assertTrue(math.isnan(r.ratio_limit_adu))
+        self.assertIn("too alike", r.ratio_why_not)
+        self.assertEqual(r.lin_method, "time ladder")
+        self.assertTrue(any("Colour-ratio check: not possible" in t for _k, t in r.lines))
+
+    def test_mono_unsteady_warns(self):
+        r = self.run_ladder("mono", bayer=None, rates={"L": 4000.0}, drift_per_frame=0.002, jumps={8: 0.985})
+        self.assertEqual(r.lin_method, "time ladder")
+        self.assertIs(r.light_steady, False)
+        self.assertTrue(any(k == "warn" and "light was not steady" in t for k, t in r.lines))
+        self.assertIn("light not steady", r.worst)
+        self.assertFalse(any("Colour-ratio check" in t for _k, t in r.lines))      # nothing to say on mono
+
+    def test_no_reference_exposure_says_so(self):
+        r = self.run_ladder("norefs", exposures=[t for t in LADDER if t != REF])
+        self.assertIsNone(r.light_steady)
+        self.assertTrue(any("No exposure was repeated" in t for _k, t in r.lines))
+        self.assertTrue(r.offset_trusted)
+
+    def test_plot_draws_the_ratio_curve(self):
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import bench_plots
+        r = self.run_ladder("unsteady", **UNSTEADY)
+        fig = plt.figure(figsize=(10, 6))
+        bench_plots.draw(fig, r)
+        labels = [t.get_text() for ax in fig.axes for t in (ax.get_legend().get_texts() if ax.get_legend() else [])]
+        self.assertTrue(any("colour ratio" in x for x in labels))
+        plt.close(fig)
+
+
+class TestCommonMode(BenchCase):
+    def test_one_rung_dip_in_every_colour_is_stepped_over(self):
+        """8 Nov 2026 (Ladder 27Oct26): one exposure off by the same % in every colour = the light, not the end of
+        the linear range."""
+        ex = [0.1, 0.2, 0.4, 0.6, 0.8, 1.0, 1.2, 1.4, 1.6, 1.8, 2.2, 2.6, 3.0]
+        r = self.run_ladder("dip", exposures=ex, nonlin=0.0, jumps={6: 0.99})
+        self.assertIn(1.2, r.common_mode)
+        g = r.channels["G"]
+        self.assertGreater(g.ladder_limit_adu, 30000)                  # not stopped at the 1.2 s dip
+        self.assertIn("stepped over 1.2 s", g.ladder_how)
+        self.assertIn("repeat it", g.ladder_how)
+
+    def test_a_real_bend_is_not_common_mode(self):
+        r = self.run_ladder("steady")
+        self.assertEqual(r.common_mode, [])
+
+
+# ---- 5: a re-run's missing colour limit ---------------------------------------------------------------------------
+
+class TestPerChannelNone(BenchCase):
+    def test_missing_limit_clears_the_old_measured_one_but_keeps_a_typed_one(self):
+        r = self.run_ladder("steady")
+        doc = bench.apply_to_profile(r, None, "test")
+        self.assertIsNotNone(doc["per_channel"]["R"]["linear_limit_adu"])
+        r2 = copy.deepcopy(r)
+        r2.channels["R"].linear_limit_adu = float("nan")
+        doc2 = bench.apply_to_profile(r2, doc, "test")
+        self.assertIsNone(doc2["per_channel"]["R"]["linear_limit_adu"])
+        doc["per_channel"]["R"]["linear_limit_adu"] = {"value": 30000, "unit": "ADU", "source": "user"}
+        doc3 = bench.apply_to_profile(r2, doc, "test")
+        self.assertEqual(doc3["per_channel"]["R"]["linear_limit_adu"]["value"], 30000)
+
+
+class TestShootingPlan(unittest.TestCase):
+    def test_reference_at_start_middle_end(self):
+        plan = bench.plan_ladder({"R": 2600.0, "G": 3400.0, "B": 3400.0}, 500.0)
+        text = bench.plan_text(plan, 100, 50, -10)
+        self.assertEqual(text.count("Reference"), 3)
+        self.assertIn("30 minutes", text)
+        self.assertIn("off the panel", text)
+        self.assertIn("colours' ratio", text)
+        self.assertNotIn("colours' ratio", bench.plan_text(plan, 100, 50, -10, color=False))
+        self.assertIn("panel OFF", text)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -806,7 +806,8 @@ class PlanDialog(tk.Toplevel):
                           "plan scales the exposures to your panel's brightness.")
                 return
             plan = bench.plan_ladder(rates, bias, sat)
-            self._set(head + bench.plan_text(plan, s.get("gain_setting"), s.get("offset"), s.get("set_temp_c")))
+            self._set(head + bench.plan_text(plan, s.get("gain_setting"), s.get("offset"), s.get("set_temp_c"),
+                                             color=len(rates) > 1))
         except (bench.BenchError, frames.FrameError, OSError, ValueError) as exc:
             self._set(f"✖ No plan: {exc}.")
 

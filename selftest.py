@@ -164,6 +164,22 @@ def s3b_bench():
     r = bench.run_bench(mono, "Central 50 %")
     check("mono 12-bit camera: gain per file ADU, step 16", r.adu_step == 16 and list(r.channels) == ["L"]
           and abs(r.gain / t["gain"] - 1) < 0.04)
+    # 1.0.0: an unsteady, colour-drifting panel with a step at one rung; the colour ratio must still find the bend
+    ex = ([2.0] + [0.1, 0.2, 0.4, 0.6, 0.8, 1.0, 1.2, 1.4, 1.6, 1.8] + [2.0] +
+          [2.2, 2.4, 2.6, 2.8, 3.0, 3.2, 3.4, 3.6, 3.8, 4.2, 4.6] + [2.0])
+    rates = {"R": 2800.0, "G": 4000.0, "B": 2000.0}
+    steady = os.path.join(TMP, "ladder_steady")
+    synth_bench.make_ladder(steady, shape=(300, 360), exposures=ex, rates=rates, nonlin=0.03)
+    rs = bench.run_bench(steady)
+    shaky = os.path.join(TMP, "ladder_shaky")
+    synth_bench.make_ladder(shaky, shape=(300, 360), exposures=ex, rates=rates, nonlin=0.03, drift_per_frame=0.002,
+                            color_drift={"R": 0.0005, "B": -0.0004}, jumps={8: 0.985, 14: 1.012}, frame_jitter=0.002)
+    ru = bench.run_bench(shaky)
+    truth = rs.channels["G"].ladder_limit_adu
+    check(f"colour ratio in unsteady light: {ru.linear_limit_adu:,.0f} ADU", ru.lin_method == "colour ratio"
+          and ru.light_steady is False and abs(ru.linear_limit_adu - truth) < 3500,
+          f"steady-light time ladder {truth:,.0f}; unsteady time ladder {ru.channels['G'].ladder_limit_adu:,.0f}")
+    check("unsteady light: no timing offset saved", "exposure_offset_s" not in bench.measured_records(ru)[0])
     lit = os.path.join(TMP, "ladder_lit")
     synth_bench.make_ladder(lit, shape=(400, 500), lit_bias=60000.0)
     check("bias frames that saw light are caught", bench.run_bench(lit, "Central 50 %").lit_bias)

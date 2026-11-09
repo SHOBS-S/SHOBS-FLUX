@@ -1355,7 +1355,8 @@ def _findings(res: BenchResult, sc: Scan) -> None:
                               "light was; one ADC reads them all, so it is one curve for every colour. A few pairs between "
                               f"{res.linear_limit_adu:,.0f} and {res.saturation_adu:,.0f} ADU would find where it bends.")
             else:
-                res.add("ok", f"✔ Linear limit {res.linear_limit_adu:,.0f} ADU (±{LIN_TOL_PCT:g} %{big}), {res.ratio_how}. "
+                res.add("ok", f"✔ Linear limit {res.linear_limit_adu:,.0f} ADU (±{LIN_TOL_PCT:g} %"
+                              + (f", largest {mx:.2f} % below it" if mx is not None else "") + f"), {res.ratio_how}. "
                               "The colours share each frame's light, so their ratio does not care how bright or steady "
                               "the light was; one ADC reads them all, so it is one curve for every colour.")
         elif res.linear_is_bound:
@@ -1626,11 +1627,13 @@ def plan_ladder(rates: dict, bias: float, sat_adu: float = 65535.0, steps: int =
     return {"exposures": ts, "drift": drift, "notes": notes}
 
 
-def plan_text(plan: dict, gain_setting=None, offset=None, temp=None, bias_pairs: int = 20) -> str:
+def plan_text(plan: dict, gain_setting=None, offset=None, temp=None, bias_pairs: int = 20, color: bool = True) -> str:
     ex = plan["exposures"]
 
     def fmt(t):
         return f"{t * 1000:g} ms" if t < 1 else f"{t:g} s"
+    half = (len(ex) + 1) // 2
+    ref = fmt(plan["drift"])
     lines = ["SHOBS-FLUX bench ladder: shooting plan",
              f"Camera: gain {gain_setting if gain_setting is not None else '(as for your lights)'}, offset "
              f"{offset if offset is not None else '(as for your lights)'}, "
@@ -1638,14 +1641,26 @@ def plan_text(plan: dict, gain_setting=None, offset=None, temp=None, bias_pairs:
              "",
              f"1. Bias: panel OFF, scope capped, shortest exposure the camera allows: {2 * bias_pairs} frames "
              f"({bias_pairs} pairs).",
-             f"2. Drift check: panel ON, let it warm up 5 minutes; 2 flats at {fmt(plan['drift'])}.",
-             f"3. Flat pairs, 2 frames at each exposure ({len(ex)} exposures, {2 * len(ex)} frames):"]
-    for i in range(0, len(ex), 6):
-        lines.append("     " + ", ".join(fmt(t) for t in ex[i:i + 6]))
-    lines += [f"4. Drift check again: 2 flats at {fmt(plan['drift'])}.",
+             f"2. Reference: panel ON and left on 30 minutes first; 2 flats at {ref}.",
+             f"3. Flat pairs, 2 frames at each exposure, first half ({half} exposures):"]
+
+    def rows(part):
+        return ["     " + ", ".join(fmt(t) for t in part[i:i + 6]) for i in range(0, len(part), 6)]
+    lines += rows(ex[:half])
+    lines += [f"4. Reference again: 2 flats at {ref}.",
+              f"5. Flat pairs, second half ({len(ex) - half} exposures):"]
+    lines += rows(ex[half:])
+    lines += [f"6. Reference again: 2 flats at {ref}.",
               "",
+              "The reference flats show how the light drifted, and FLUX takes that out. Keep the camera off the panel "
+              "(resting on it warms both), and don't touch the panel or the scope during the ladder."]
+    if color:
+        lines.append("Colour camera: FLUX also checks linearity from the colours' ratio in each frame, which a "
+                     "drifting light cannot spoil. That needs one colour clearly dimmer than another (a warm panel, or "
+                     "a sheet of paper over it, does it); with all three colours equally bright it cannot be made.")
+    lines += ["",
               "ASIAIR: use the flat frame type with the exposure typed by hand (not auto-flat), or a Plan with one "
-              "line per exposure. Don't touch the panel or the scope during the ladder.",
+              "line per exposure.",
               "Put every frame in one folder (the bias frames may go in a folder of their own), then Camera page → "
               "Flats folder… (and Bias folder…) → Run."]
     lines += [""] + plan["notes"] if plan["notes"] else []

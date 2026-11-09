@@ -106,6 +106,17 @@ class TestBench(TempData):
         folder, t = self.ladder(drift_per_frame=0.003, exposures=ex)
         r = bench.run_bench(folder, REGION)
         self.assertGreater(abs(r.drift_pct), 1.0)
+        # 1.0.0: noticed as unsteady light; on a colour camera the colour ratio sets the limit, so it is a plain note
+        self.assertIs(r.light_steady, False)
+        self.assertTrue(any("The light was not steady" in x for _, x in r.lines), r.lines)
+        if r.lin_method == "time ladder":
+            self.assertEqual(r.status, "warn")
+
+    def test_drift_noticed_mono_warns(self):
+        ex = (0.05, 0.1, 0.2, 0.3, 0.5, 0.75, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0)
+        folder, t = self.ladder("mono_drift", drift_per_frame=0.003, exposures=ex, bayer=None)
+        r = bench.run_bench(folder, REGION)
+        self.assertGreater(abs(r.drift_pct), 1.0)
         self.assertEqual(r.status, "warn")
 
     def test_small_panel_leak_caught(self):
