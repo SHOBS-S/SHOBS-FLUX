@@ -1246,6 +1246,50 @@ def _choose_limit(res: BenchResult) -> None:
         "time ladder" if picks == {"time ladder"} else "colour ratio and time ladder")
 
 
+def _exps(ts: list) -> str:
+    ts = sorted(set(ts))
+    return ", ".join(f"{t:g}" for t in ts[:6]) + (f" and {len(ts) - 6} more" if len(ts) > 6 else "") + " s"
+
+
+def _light_findings(res: BenchResult) -> None:
+    """The light: steady, unknown (nothing repeated) or not steady, and what that did to the answer."""
+    why = []
+    if math.isfinite(res.drift_pct) and abs(res.drift_pct) > STEADY_PCT:
+        why.append(f"repeated exposures differ by {res.drift_pct:+.1f} %")
+    if res.unsteady_pairs:
+        n = len(res.unsteady_pairs)
+        why.append(f"the two frames of {n} pair{'s' if n != 1 else ''} differ by up to {res.worst_pair_pct:.2f} % "
+                   f"({_exps(res.unsteady_pairs)})")
+    if res.common_mode:
+        why.append(f"pairs at {_exps(res.common_mode)} are off the line by the same amount in every colour")
+    if res.light_steady:
+        res.add("ok", f"✔ Light steady: repeated exposures ({res.ref_exptime:g} s × {res.ref_n}) agree to "
+                      f"{res.drift_pct:+.2f} %, and each pair's two frames to {res.worst_pair_pct:.2f} % or better.")
+    elif res.light_steady is None:
+        res.add("info", "No exposure was repeated, so the light's drift during the ladder cannot be measured or taken "
+                        "out. Shoot one exposure (the Shooting plan's reference, e.g. 8 s) at the start, the middle "
+                        "and the end of the ladder.")
+    elif res.lin_method == "colour ratio":
+        res.add("info", "The light was not steady (" + "; ".join(why) + "), so the time ladder cannot judge "
+                        f"±{LIN_TOL_PCT:g} %; the colour ratio, which the light's brightness cancels out of, sets the "
+                        "linear limit instead. The gain is not affected (each pair's two frames are scaled to each "
+                        "other).")
+    else:
+        res.add("warn", "⚠ The light was not steady (" + "; ".join(why) + "): the linear limit from the time ladder "
+                        "carries that doubt" + (" (no colours to compare on a mono camera)" if len(res.channels) == 1
+                                                else "") + ". Let the panel run 30 minutes first, keep the camera off "
+                        "it, and shoot the reference exposure at the start, middle and end.",
+                short="light not steady")
+    flick = []
+    for c in res.channels:
+        for p in res.channels[c].pairs:
+            if not p.saturated and math.isfinite(p.ratio) and abs(p.ratio - 1) > PAIR_RATIO_TOL:
+                flick.append(p.exptime)
+    if flick:
+        res.add("info", f"The two frames of {len(set(flick))} pair{'s' if len(set(flick)) != 1 else ''} differ by "
+                        f"more than {100 * PAIR_RATIO_TOL:g} % (panel flicker); corrected by scaling one to the other.")
+
+
 def _findings(res: BenchResult, sc: Scan) -> None:
     chans = list(res.channels)
     g = res.gain
@@ -1286,7 +1330,20 @@ def _findings(res: BenchResult, sc: Scan) -> None:
     if math.isfinite(res.linear_limit_adu):
         per = ", ".join(f"{c} {res.channels[c].linear_limit_adu:,.0f}" + ("+" if res.channels[c].linear_is_bound else "")
                         for c in chans if math.isfinite(res.channels[c].linear_limit_adu))
-        if res.linear_is_bound:
+        if res.lin_method == "colour ratio":
+            mx = max((ch.max_dev_pct for ch in res.channels.values() if math.isfinite(ch.max_dev_pct)), default=None)
+            big = f" (largest {mx:.2f} %)" if mx is not None else ""
+            if res.linear_is_bound:
+                res.add("ok", f"✔ Linear limit at least {res.linear_limit_adu:,.0f} ADU, from the colour ratio: the "
+                              f"sensor stays within ±{LIN_TOL_PCT:g} %{big} right up to the brightest unsaturated level. "
+                              "The colours share each frame's light, so their ratio does not care how bright or steady the "
+                              "light was; one ADC reads them all, so it is one curve for every colour. A few pairs between "
+                              f"{res.linear_limit_adu:,.0f} and {res.saturation_adu:,.0f} ADU would find where it bends.")
+            else:
+                res.add("ok", f"✔ Linear limit {res.linear_limit_adu:,.0f} ADU (±{LIN_TOL_PCT:g} %{big}), {res.ratio_how}. "
+                              "The colours share each frame's light, so their ratio does not care how bright or steady "
+                              "the light was; one ADC reads them all, so it is one curve for every colour.")
+        elif res.linear_is_bound:
             res.add("ok", f"✔ Linear limit at least {res.linear_limit_adu:,.0f} ADU: every color stayed within "
                           f"±{LIN_TOL_PCT:g} % of a straight line right up to its last unsaturated pair ({per}). One "
                           "ADC reads all colors, so the highest of those holds for the camera. A few pairs between "
@@ -1296,32 +1353,27 @@ def _findings(res: BenchResult, sc: Scan) -> None:
                          and not res.channels[c].linear_is_bound), key=lambda c: res.channels[c].linear_limit_adu)
             res.add("ok", f"✔ Linear limit {res.linear_limit_adu:,.0f} ADU (±{LIN_TOL_PCT:g} %; {per}). "
                           f"{worst}: {res.channels[worst].linear_limit_how}.")
+        if res.lin_method != "colour ratio" and math.isfinite(res.ratio_limit_adu):
+            res.add("info", f"Colour-ratio check (light-free): " + ("at least " if res.ratio_is_bound else "") +
+                            f"{res.ratio_limit_adu:,.0f} ADU; the time ladder found the lower limit, which is used.")
     else:
         res.add("warn", "⚠ The linear limit could not be found: too few unsaturated pairs at different exposures.",
                 short="linear limit not found")
+    if len(chans) == 3 and res.ratio_why_not:
+        res.add("info", f"Colour-ratio check: not possible ({res.ratio_why_not}).")
     if math.isfinite(res.t_offset):
         sig = res.t_offset_sigma if math.isfinite(res.t_offset_sigma) else 0.0
-        word = ("the camera exposes as long as it is told" if abs(res.t_offset) < max(3 * sig, 0.002) else
-                ("each exposure is really longer than asked" if res.t_offset > 0 else
-                 "each exposure is really shorter than asked"))
-        res.add("ok" if abs(res.t_offset) < max(3 * sig, 0.01) else "info",
-                (("✔ " if abs(res.t_offset) < max(3 * sig, 0.01) else "") +
-                 f"Exposure-timing offset {1000 * res.t_offset:+.1f} ± {1000 * sig:.1f} ms: {word}."))
-    if math.isfinite(res.drift_pct):
-        if abs(res.drift_pct) > 1.0:
-            res.add("warn", f"⚠ The panel changed by {res.drift_pct:+.1f} % between repeated exposures: linearity "
-                            "numbers carry that much doubt. Let the panel warm up, and shoot a drift pair at the start "
-                            "and end.", short="panel drifted")
+        if not res.offset_trusted:
+            res.add("info", f"Exposure-timing offset {1000 * res.t_offset:+.1f} ± {1000 * sig:.1f} ms: not saved, "
+                            "because the light was not steady (it comes from the time ladder).")
         else:
-            res.add("ok", f"✔ Panel steady: repeated exposures agree to {res.drift_pct:+.2f} %.")
-    flick = []
-    for c in chans:
-        for p in res.channels[c].pairs:
-            if not p.saturated and math.isfinite(p.ratio) and abs(p.ratio - 1) > PAIR_RATIO_TOL:
-                flick.append(p.exptime)
-    if flick:
-        res.add("info", f"The two frames of {len(set(flick))} pair{'s' if len(set(flick)) != 1 else ''} differ by "
-                        f"more than {100 * PAIR_RATIO_TOL:g} % (panel flicker); corrected by scaling one to the other.")
+            word = ("the camera exposes as long as it is told" if abs(res.t_offset) < max(3 * sig, 0.002) else
+                    ("each exposure is really longer than asked" if res.t_offset > 0 else
+                     "each exposure is really shorter than asked"))
+            res.add("ok" if abs(res.t_offset) < max(3 * sig, 0.01) else "info",
+                    (("✔ " if abs(res.t_offset) < max(3 * sig, 0.01) else "") +
+                     f"Exposure-timing offset {1000 * res.t_offset:+.1f} ± {1000 * sig:.1f} ms: {word}."))
+    _light_findings(res)
     n_sat = sum(1 for p in next(iter(res.channels.values())).pairs if p.saturated)
     usable = res.n_flat_pairs - n_sat
     if n_sat and n_sat > res.n_flat_pairs / 2:
@@ -1346,7 +1398,8 @@ def summary_of(res: BenchResult) -> dict:
            "bias_adu": f(res.bias_adu, 1),
            "exposure_offset_s": f(res.t_offset, 5), "drift_pct": f(res.drift_pct, 3), "lit_bias": res.lit_bias,
            "n_flat_pairs": res.n_flat_pairs, "n_bias_pairs": res.n_bias_pairs, "temp_c": res.temp_c,
-           "worst": res.worst, "channels": {}}
+           "worst": res.worst, "linear_method": res.lin_method, "light_steady": res.light_steady,
+           "ratio_limit_adu": f(res.ratio_limit_adu, 0), "channels": {}}
     for c, ch in res.channels.items():
         out["channels"][c] = {"gain": f(ch.gain), "gain_sigma": f(ch.gain_sigma, 5),
                               "read_noise_e": f(ch.read_noise_e, 3), "bias_adu": f(ch.bias_adu, 1),
@@ -1404,10 +1457,12 @@ def measured_records(res: BenchResult, run_key: str | None = None) -> tuple[dict
              else "ADC top: (saturation − bias) × gain"),
             ("saturation_adu", res.saturation_adu, "ADU", None, None, 0, "level the brightest flats pile up at"),
             ("linear_limit_adu", res.linear_limit_adu, "ADU", None, None, 0,
+             (f"colour ratio (light-free), one curve for the sensor: " if res.lin_method == "colour ratio" else "") +
              (f"at least: straight (±{LIN_TOL_PCT:g} %) to the brightest unsaturated pair" if res.linear_is_bound
               else f"last pair within ±{LIN_TOL_PCT:g} % of the straight line (lowest color)")),
             ("bias_level_adu", res.bias_adu, "ADU", None, res.n_bias_pairs, 1, "bias pairs"),
-            ("exposure_offset_s", res.t_offset, "s", res.t_offset_sigma, None, 4, "linearity fit")):
+            ("exposure_offset_s", res.t_offset if res.offset_trusted else float("nan"), "s", res.t_offset_sigma,
+             None, 4, "linearity fit")):
         r = _rec(v, unit, sig, n, d, cond, run_key, note, nd)
         if r is not None:
             vals[key] = r
@@ -1416,20 +1471,34 @@ def measured_records(res: BenchResult, run_key: str | None = None) -> tuple[dict
         per[c] = {"gain_e_per_adu": _rec(ch.gain, "e-/ADU", ch.gain_sigma, ch.n_gain, d, cond, run_key),
                   "read_noise_e": _rec(ch.read_noise_e, "e-", None, res.n_bias_pairs, d, cond, run_key, nd=3),
                   "linear_limit_adu": _rec(ch.linear_limit_adu, "ADU", None, None, d, cond, run_key,
-                                           f"at least: straight (±{LIN_TOL_PCT:g} %) to this color's brightest "
-                                           "unsaturated pair" if ch.linear_is_bound else
-                                           f"this color's last pair within ±{LIN_TOL_PCT:g} % of the straight line", nd=0)}
+                                           _limit_note(ch), nd=0)}
     lead = res.channels.get("G") or next(iter(res.channels.values()))
-    curve = [[round(p.mean_raw, 1), round(p.deviation_pct, 3)] for p in sorted(lead.pairs, key=lambda p: p.signal)
-             if math.isfinite(p.deviation_pct) and not p.saturated]
+    ladder = [[round(p.mean_raw, 1), round(p.deviation_pct, 3)] for p in sorted(lead.pairs, key=lambda p: p.signal)
+              if math.isfinite(p.deviation_pct) and not p.saturated]
+    by_ratio = lead.linear_limit_how.startswith("colour ratio") and bool(res.ratio_curve)
+    curve = ([[q["level"], round(q["dev_pct"], 3)] for q in sorted(res.ratio_curve, key=lambda q: q["level"])]
+             if by_ratio else ladder)
     top = res.saturation_adu if math.isfinite(res.saturation_adu) else 65535.0
-    lin = {"curve_adu": curve, "max_deviation_pct": None if not math.isfinite(lead.max_dev_pct) else
+    lin = {"curve_adu": curve, "method": "colour ratio" if by_ratio else "time ladder",
+           "max_deviation_pct": None if not math.isfinite(lead.max_dev_pct) else
            round(lead.max_dev_pct, 3),
            # the fraction the max deviation holds to: the linear limit, not the top of the whole curve (0.6.1)
            "measured_to_fraction_of_full_scale": (round(lead.linear_limit_adu / top, 3)
                                                   if math.isfinite(lead.linear_limit_adu) else None) if curve else None,
            "source": "measured", "date": d}
+    if by_ratio:
+        lin["time_ladder_curve_adu"] = ladder
+        lin["light_steady"] = res.light_steady
     return vals, per, lin
+
+
+def _limit_note(ch: ChannelResult) -> str:
+    pre = "colour ratio (light-free), one curve for the sensor: " if ch.linear_limit_how.startswith("colour ratio") \
+        else ""
+    return pre + (f"at least: straight (±{LIN_TOL_PCT:g} %) to the brightest unsaturated level" if ch.linear_is_bound
+                  and pre else f"at least: straight (±{LIN_TOL_PCT:g} %) to this color's brightest unsaturated pair"
+                  if ch.linear_is_bound else f"last level within ±{LIN_TOL_PCT:g} % of the straight line" if pre
+                  else f"this color's last pair within ±{LIN_TOL_PCT:g} % of the straight line")
 
 
 def changes_for(res: BenchResult, doc: dict | None) -> list[tuple[str, object, str, object]]:
@@ -1485,6 +1554,12 @@ def apply_to_profile(res: BenchResult, doc: dict | None, written_by: str, run_ke
                 if keep_user and isinstance(old, dict) and old.get("source") == "user":
                     continue
                 slot[k] = r
+            elif k == "linear_limit_adu":
+                # a re-run that could not find this colour's linear limit: its old measured value (an older rule, or
+                # a run the light spoiled) must not stand in for it; a value the user typed stays (Fable 0.6.1 note)
+                old = slot.get(k)
+                if not (isinstance(old, dict) and old.get("source") == "user"):
+                    slot[k] = None
             else:
                 slot.setdefault(k, None)
         pc[c] = slot

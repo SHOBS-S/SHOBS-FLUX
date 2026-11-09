@@ -5,7 +5,8 @@ draw(fig, res) fills a matplotlib Figure (no Tk needed, so the tests and the sel
   top     the photon transfer curve: temporal variance against signal (ADU², ADU; log–log) per color, the fitted
           line (shot noise + read noise) through the points it rests on, saturated pairs as hollow marks;
   bottom  linearity: each pair's deviation from the straight line (%) against its raw level (ADU), the ±LIN_TOL_PCT band,
-          and the linear limit.
+          and the linear limit; on a colour camera also the colour-ratio curve (dark line, light-free), and the time
+          ladder's points faded when the colour ratio set the limit.
 Filled marks = used in the fit; hollow = shown, not used (saturated, or past the straight part)."""
 from __future__ import annotations
 
@@ -99,19 +100,29 @@ def _linearity(ax, res):
     ax.axhspan(-tol, tol, color="#eaf2f8", zorder=0)
     ax.axhline(0, color="#9aa7b0", linewidth=0.8)
     ymax = 2.5 * tol
+    by_ratio = res.lin_method == "colour ratio"
+    fade = 0.35 if by_ratio else 1.0               # the time ladder only shown when the colour ratio decided
     for c, ch in res.channels.items():
         col = COLORS.get(c, INK)
         pts = sorted([p for p in ch.pairs if p.exptime > 0 and math.isfinite(p.deviation_pct) and not p.saturated],
                      key=lambda p: p.mean_raw)
         if not pts:
             continue
-        ax.plot([p.mean_raw for p in pts], [p.deviation_pct for p in pts], color=col, linewidth=0.9, alpha=0.6)
+        ax.plot([p.mean_raw for p in pts], [p.deviation_pct for p in pts], color=col, linewidth=0.9,
+                alpha=0.6 * fade)
         used = [p for p in pts if p.used_lin]
         other = [p for p in pts if not p.used_lin]
-        ax.scatter([p.mean_raw for p in used], [p.deviation_pct for p in used], s=24, color=col, zorder=3, label=c)
+        lab = f"{c} (time ladder)" if res.ratio_curve else c
+        ax.scatter([p.mean_raw for p in used], [p.deviation_pct for p in used], s=24, color=col, zorder=3,
+                   label=lab, alpha=fade)
         ax.scatter([p.mean_raw for p in other], [p.deviation_pct for p in other], s=24, facecolors="none",
-                   edgecolors=col, linewidths=1.2, zorder=3)
+                   edgecolors=col, linewidths=1.2, zorder=3, alpha=fade)
         ymax = max(ymax, min(12.0, 1.15 * max(abs(p.deviation_pct) for p in pts)))
+    if res.ratio_curve:
+        q = sorted(res.ratio_curve, key=lambda r: r["level"])
+        ax.plot([r["level"] for r in q], [r["dev_pct"] for r in q], color=INK, linewidth=1.8, marker="D",
+                markersize=4.5, zorder=4, label="sensor (colour ratio, light-free)")
+        ymax = max(ymax, min(12.0, 1.15 * max(abs(r["dev_pct"]) for r in q)))
     if math.isfinite(res.linear_limit_adu):
         ax.axvline(res.linear_limit_adu, color="#8a5a00", linewidth=1.2, linestyle="--")
         ax.text(res.linear_limit_adu, ymax * 0.92, ("at least " if res.linear_is_bound else "")
@@ -122,9 +133,11 @@ def _linearity(ax, res):
     ax.set_xlim(left=0)
     ax.set_xlabel("Raw level (ADU, bias included)", fontsize=9)
     ax.set_ylabel("Off the straight line (%)", fontsize=9)
-    ax.set_title(f"Linearity: ±{tol:g} % band, dashed = linear limit, dotted = saturation", fontsize=10,
-                 color=INK, loc="left")
+    ax.set_title(f"Linearity ({res.lin_method}): ±{tol:g} % band, dashed = linear limit, dotted = saturation",
+                 fontsize=10, color=INK, loc="left")
     ax.xaxis.set_major_formatter(_thousands())
+    if res.ratio_curve:
+        ax.legend(fontsize=7.5, frameon=False, loc="lower left")
 
 
 def _thousands():
