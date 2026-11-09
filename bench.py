@@ -36,6 +36,11 @@ import shobs_profile as sp
 
 LIN_TOL_PCT = 0.5            # the linear limit: the brightest pair still within this many percent of the line
                              # (0.5 % from FLUX 0.6.1, John 8 Nov 2026; was 1 % and interpolated past the last good pair)
+STEADY_PCT = 0.2             # the light counts as steady when repeated exposures agree, and each pair's two frames
+                             # agree, to this many percent (1.0.0); beyond it the time ladder cannot judge ±0.5 %
+RATIO_MAX_K = 0.9            # colour-ratio check: the dimmer colour must sit below this fraction of the brighter one,
+                             # or a bend at one level shows in both and cancels (blue and green alike, 9 Nov 2026)
+RATIO_MIN_POINTS = 3         # colour-ratio points above the straight base needed to judge the linear limit
 SAT_FRACTION = 0.001         # a pair with more than this fraction of region pixels at saturation is saturated
 PAIR_RATIO_TOL = 0.01        # the two frames of a pair must agree to 1 % (panel flicker / drift)
 REGIONS = {"Central 25 %": 0.25, "Central 50 %": 0.5, "Central 10 %": 0.10}
@@ -70,6 +75,19 @@ class Pair:
     a: FrameInfo
     b: FrameInfo
     order: int                 # shooting order of the pair (0 = first)
+    t_mid: float = float("nan")  # seconds after the first frame (DATE-OBS), the order when the headers give no time
+
+
+def _secs(when: str) -> float | None:
+    """DATE-OBS as seconds (any fixed origin); None when it is not a date."""
+    from datetime import datetime
+    w = str(when or "").strip().replace("Z", "")
+    if len(w) < 19 or w[4] != "-":
+        return None
+    try:
+        return datetime.fromisoformat(w[:26].replace(" ", "T")).timestamp()
+    except ValueError:
+        return None
 
 
 @dataclass
@@ -202,6 +220,15 @@ def scan_folder(folder: str, step=None, bias_folder: str | None = None) -> Scan:
     allp = sorted(sc.flat_pairs + sc.bias_pairs, key=lambda p: (p.a.when, p.a.name))
     for i, p in enumerate(allp):
         p.order = i
+    # each flat pair's time (the two frames' mid-point): the reference exposures' drift is taken out against it
+    ts = {id(p): [_secs(p.a.when), _secs(p.b.when)] for p in sc.flat_pairs}
+    if sc.flat_pairs and all(None not in v for v in ts.values()):
+        t0 = min(min(v) for v in ts.values())
+        for p in sc.flat_pairs:
+            p.t_mid = 0.5 * (ts[id(p)][0] + ts[id(p)][1]) - t0
+    else:
+        for p in sc.flat_pairs:
+            p.t_mid = float(p.order)
     if singles:
         sc.notes.append(("info", f"{singles} frame{'s' if singles != 1 else ''} without a partner at the same "
                                  "exposure left out (pairs only)."))
@@ -305,7 +332,10 @@ class PairStat:
     saturated: bool = False
     used_gain: bool = False
     used_lin: bool = False
-    deviation_pct: float = float("nan")
+    deviation_pct: float = float("nan")  # off the time ladder's straight line (light drift taken out when it can be)
+    t_mid: float = float("nan")          # when the pair was shot (s after the first flat)
+    common_mode: bool = False            # off the line by the same % in every colour: the light, not the sensor
+    sensor_dev_pct: float = float("nan")  # the colour-ratio curve at this pair's level (light-free)
 
 
 @dataclass
@@ -329,6 +359,10 @@ class ChannelResult:
     linear_limit_adu: float = float("nan")
     linear_limit_how: str = ""
     max_dev_pct: float = float("nan")  # largest |deviation| below the linear limit
+    ladder_limit_adu: float = float("nan")  # the time ladder's own answer (kept when the colour ratio decides)
+    ladder_is_bound: bool = False
+    ladder_how: str = ""
+    drift_corrected: bool = False      # the time ladder had its light drift taken out (repeated exposures)
     pairs: list = field(default_factory=list)
     n_gain: int = 0
     n_lin: int = 0
@@ -368,6 +402,21 @@ class BenchResult:
     thumb_scale: int = 1
     summary: dict = field(default_factory=dict)
     shorts: dict = field(default_factory=dict)          # line index → the few words the History list shows
+    # 1.0.0: the light and the colour-ratio check
+    lin_method: str = "time ladder"                     # what set the linear limit: colour ratio / time ladder
+    ratio_curve: list = field(default_factory=list)     # [{level, dev_pct, direct_pct, hi, lo, exptime, t}] by level
+    ratio_limit_adu: float = float("nan")
+    ratio_is_bound: bool = False
+    ratio_how: str = ""
+    ratio_why_not: str = ""                             # why the colour-ratio check could not be made
+    ratio_noise_pct: float = float("nan")               # scatter of the ratio on the straight base (one pair)
+    light_steady: bool | None = None                    # None: no repeated exposure to tell
+    worst_pair_pct: float = float("nan")                # the two frames of a pair: the largest disagreement, %
+    unsteady_pairs: list = field(default_factory=list)  # exposures whose two frames disagree by > STEADY_PCT
+    common_mode: list = field(default_factory=list)     # exposures off the line alike in every colour
+    ref_exptime: float = float("nan")                   # the repeated (reference) exposure
+    ref_n: int = 0
+    offset_trusted: bool = True                          # the timing offset is saved only from steady light
 
     def add(self, kind: str, text: str, short: str | None = None) -> None:
         self.lines.append((kind, text))
@@ -595,6 +644,17 @@ def run_bench(folder: str, region_name: str = DEFAULT_REGION, step=None, scan: S
             ch.bias_adu = common
             _channel(ch, raw, c, q, sat_level, res.adu_step, derive=False, rn_hint_e=rn_hint)
             ch.bias_source = "derived"
+    # 1.0.0: pairs off the line alike in every colour (the light), the colour-ratio curve, the light's steadiness,
+    # and which of the two answers sets each colour's linear limit; then the gain on the straight part, and full well
+    _common_mode(res)
+    for c in chans:
+        _walk(res.channels[c], res.channels[c].pairs)
+    res.drift_pct = _drift(res, raw)
+    _ratio_linearity(res)
+    _light(res)
+    _choose_limit(res)
+    for c in chans:
+        _finish_channel(res.channels[c], sat_level)
     for c in chans:
         ch = res.channels[c]
         if not math.isnan(ch.gain) and not math.isnan(ch.read_noise_adu):
@@ -632,7 +692,6 @@ def run_bench(folder: str, region_name: str = DEFAULT_REGION, step=None, scan: S
         # value is no better known than the best single color
         res.t_offset_sigma = float(min(s for _, s in off))
     res.n_flat_pairs = len(sc.flat_pairs)
-    res.drift_pct = _drift(res, raw)
     _findings(res, sc)
     res.summary = summary_of(res)
     return res
@@ -730,7 +789,8 @@ def _channel(ch: ChannelResult, raw: list, c: str, q: float, sat_level: float, s
             var = vd / (1.0 + k * k) - q
             mean_raw = 0.5 * (m.ma + m.mb)
             ps = PairStat(p.exptime, p.order, (p.a.name, p.b.name), mean_raw, mean_raw - bias, var,
-                          abs(var) * math.sqrt(2.0 / max(m.n, 2)), (sa / sb) if sb > 0 else float("nan"), sat_frac)
+                          abs(var) * math.sqrt(2.0 / max(m.n, 2)), (sa / sb) if sb > 0 else float("nan"), sat_frac,
+                          t_mid=p.t_mid if math.isfinite(p.t_mid) else float(p.order))
             ps.saturated = sat_frac > SAT_FRACTION or mean_raw >= sat_level - 2 * step
             out.append(ps)
         return out
@@ -755,17 +815,26 @@ def _channel(ch: ChannelResult, raw: list, c: str, q: float, sat_level: float, s
     ch.pairs = pts
     ch.saturation_adu = sat_level
     _fit_linearity(ch, pts, sat_level)
-    if math.isfinite(ch.bias_adu):
-        # the gain again, on the straight part only (a bending response bends the variance three times as fast)
-        if math.isfinite(ch.linear_limit_adu):
-            lin_top = ch.linear_limit_adu - ch.bias_adu
-            for tol in (0.3, 0.5):
-                straight = [p for p in pts if not p.saturated and 0 < p.signal <= lin_top and p.var > 0 and
-                            (not math.isfinite(p.deviation_pct) or abs(p.deviation_pct) <= tol)]
-                if len(straight) >= 4:
-                    _fit_gain(ch, pts, sat_level - ch.bias_adu, only=straight)
-                    break
-        _full_well(ch, pts, sat_level)
+
+
+def _finish_channel(ch: ChannelResult, sat_level: float) -> None:
+    """Once the linear limit is settled (time ladder or colour ratio): the gain again on the straight part only (a
+    bending response bends the variance three times as fast), and the full well."""
+    pts = ch.pairs
+    if not math.isfinite(ch.bias_adu):
+        return
+    if math.isfinite(ch.linear_limit_adu):
+        lin_top = ch.linear_limit_adu - ch.bias_adu
+        for tol in (0.3, 0.5):
+            def dev(p):
+                # the light-free curve when there is one (an unsteady panel makes the time ladder's deviations noise)
+                return p.sensor_dev_pct if math.isfinite(p.sensor_dev_pct) else p.deviation_pct
+            straight = [p for p in pts if not p.saturated and 0 < p.signal <= lin_top and p.var > 0 and
+                        (not math.isfinite(dev(p)) or abs(dev(p)) <= tol)]
+            if len(straight) >= 4:
+                _fit_gain(ch, pts, sat_level - ch.bias_adu, only=straight)
+                break
+    _full_well(ch, pts, sat_level)
 
 
 def _mark_full(ch: ChannelResult, pts: list, top: float) -> bool:
@@ -815,32 +884,62 @@ def _fit_gain(ch: ChannelResult, pts: list, top: float, only: list | None = None
     ch.n_gain = len(ok)
 
 
+def _reference(pts: list) -> tuple[float, list]:
+    """The repeated (reference) exposure: the unsaturated exposure shot as the most pairs (ties: the widest spread in
+    time). (exposure, its pairs in time order); (nan, []) when nothing was repeated."""
+    by_t: dict = {}
+    for p in pts:
+        if not p.saturated and p.signal > 0 and p.exptime > 0:
+            by_t.setdefault(p.exptime, []).append(p)
+    rep = [v for v in by_t.values() if len(v) > 1]
+    if not rep:
+        return float("nan"), []
+    best = max(rep, key=lambda v: (len(v), max(q.t_mid for q in v) - min(q.t_mid for q in v)))
+    return best[0].exptime, sorted(best, key=lambda q: q.t_mid)
+
+
+def _light_at(refs: list, t: float, value) -> float:
+    """The reference exposure's value(pair) at time t, relative to its mean: straight lines between the reference pairs,
+    flat beyond the first and last."""
+    tr = np.array([q.t_mid for q in refs], dtype=float)
+    vr = np.array([value(q) for q in refs], dtype=float)
+    return float(np.interp(t, tr, vr) / np.mean(vr))
+
+
 def _fit_linearity(ch: ChannelResult, pts: list, sat_level: float) -> None:
-    """The raw mean level against exposure, M = c + rate·t, fitted on the pairs between 2 % and 30 % of the range;
-    each pair's deviation from that line, in percent of its exposure's signal (rate·t); the linear limit = the highest
-    raw level still within ±LIN_TOL_PCT: the last good pair itself, never interpolated toward the first bad one (the
-    bend can sit anywhere between them, so only the measured pair is known to be linear; GitHub SHOBS-FLUX #3). Working on raw levels keeps the
-    linearity independent of the bias: c is the bias plus rate × timing offset, and the offset comes out only when
-    the bias was measured."""
+    """The time ladder: the raw mean level against exposure, M = c + rate·t, fitted on the pairs between 2 % and 30 %
+    of the range; each pair's deviation from that line, in percent of its exposure's signal (rate·t). When an exposure
+    was repeated through the ladder (reference pairs), the light's drift between them is taken out first: each pair's
+    signal is divided by the reference's level at that time (straight lines between the references). The linear
+    limit: _walk(). Working on raw levels keeps the linearity independent of the bias: c is the bias plus rate ×
+    timing offset, and the offset comes out only when the bias was measured."""
     ch.linear_limit_adu, ch.linear_limit_how, ch.linear_is_bound = float("nan"), "", False
     ch.max_dev_pct = ch.rate = ch.t_offset = ch.t_offset_sigma = ch.lin_intercept = float("nan")
     ch.n_lin = 0
+    ch.drift_corrected = False
     for p in pts:
         p.used_lin = False
         p.deviation_pct = float("nan")
     good = [p for p in pts if not p.saturated and p.exptime > 0]
     if len(good) < 3:
         return
-    lo_raw = min(p.mean_raw for p in good)
-    rng = sat_level - (ch.bias_adu if math.isfinite(ch.bias_adu) else lo_raw)
     floor = ch.bias_adu if math.isfinite(ch.bias_adu) else 0.0
-    base = [p for p in good if 0.02 * rng <= p.mean_raw - floor <= 0.30 * rng]
+    level = {id(p): p.mean_raw for p in pts}
+    _t_ref, refs = _reference(pts)
+    if refs and math.isfinite(ch.bias_adu) and len({q.t_mid for q in refs}) > 1:
+        for p in pts:
+            if p.exptime > 0 and p.signal > 0:
+                level[id(p)] = ch.bias_adu + p.signal / _light_at(refs, p.t_mid, lambda q: q.signal)
+        ch.drift_corrected = True
+    lo_raw = min(level[id(p)] for p in good)
+    rng = sat_level - (ch.bias_adu if math.isfinite(ch.bias_adu) else lo_raw)
+    base = [p for p in good if 0.02 * rng <= level[id(p)] - floor <= 0.30 * rng]
     if len({p.exptime for p in base}) < 3:
         base = sorted(good, key=lambda p: p.exptime)[: max(3, len(good) // 2)]
     if len({p.exptime for p in base}) < 2:
         return
     t = np.array([p.exptime for p in base])
-    m = np.array([p.mean_raw for p in base])
+    m = np.array([level[id(p)] for p in base])
     w = 1.0 / np.maximum((m - floor) * 0.002, 1.0) ** 2            # ~0.2 % per pair: panel and photon noise
     c, b, cov, _ = _wls(t, m, w)
     if not (b > 0):
@@ -857,22 +956,38 @@ def _fit_linearity(ch: ChannelResult, pts: list, sat_level: float) -> None:
     ch.n_lin = len(base)
     for p in pts:
         if p.exptime > 0:
-            p.deviation_pct = 100.0 * (p.mean_raw - c - b * p.exptime) / (b * p.exptime)
-    # walk up the ladder: the last pair within tolerance before the first one outside it
+            p.deviation_pct = 100.0 * (level[id(p)] - c - b * p.exptime) / (b * p.exptime)
+    _walk(ch, pts)
+
+
+def _walk(ch: ChannelResult, pts: list) -> None:
+    """The time ladder's linear limit: walk up the ladder; the last pair within ±LIN_TOL_PCT before the first one
+    outside it (0.6.1, #3: the measured pair itself, never interpolated toward the first bad one). A pair off the line
+    by the same amount in every colour (common_mode, 1.0.0) is the light at that exposure, not the sensor: stepped
+    over, and named. Fills ch.linear_limit_* and ch.ladder_* (the time ladder's own answer)."""
+    ch.linear_limit_adu, ch.linear_limit_how, ch.linear_is_bound = float("nan"), "", False
+    ch.max_dev_pct = float("nan")
     ladder = sorted([p for p in pts if p.exptime > 0 and math.isfinite(p.deviation_pct)], key=lambda p: p.signal)
-    # (0.6.1, #3: no stray pair is skipped any more; the first pair outside the band ends the range, so every pair
-    # at or below the limit is within ±LIN_TOL_PCT)
     last_ok, first_bad = None, None
+    skipped = []
     for p in ladder:
         if p.saturated:
             first_bad = first_bad or p
             break
         if abs(p.deviation_pct) <= LIN_TOL_PCT:
             last_ok = p
+        elif p.common_mode:
+            skipped.append(p)
         else:
             first_bad = p
             break
+    note = ""
+    if skipped:
+        note = ("; stepped over " + ", ".join(f"{q.exptime:g} s ({q.deviation_pct:+.2f} %)" for q in skipped) +
+                ": off by the same amount in every colour, so the light changed at that exposure, not the sensor "
+                "(repeat it to check)")
     if last_ok is None:
+        ch.ladder_limit_adu, ch.ladder_is_bound, ch.ladder_how = float("nan"), False, ""
         return
     lim = last_ok.mean_raw
     if first_bad is not None and not first_bad.saturated and math.isfinite(first_bad.deviation_pct):
@@ -891,9 +1006,11 @@ def _fit_linearity(ch: ChannelResult, pts: list, sat_level: float) -> None:
         how = "straight up to the brightest pair shot; the limit may be higher"
         ch.linear_is_bound = True
     ch.linear_limit_adu = float(lim)
-    ch.linear_limit_how = how
-    below = [abs(p.deviation_pct) for p in ladder if p.mean_raw <= lim and math.isfinite(p.deviation_pct)]
+    ch.linear_limit_how = how + note
+    below = [abs(p.deviation_pct) for p in ladder if p.mean_raw <= lim and math.isfinite(p.deviation_pct)
+             and not p.common_mode]
     ch.max_dev_pct = float(max(below)) if below else float("nan")
+    ch.ladder_limit_adu, ch.ladder_is_bound, ch.ladder_how = ch.linear_limit_adu, ch.linear_is_bound, ch.linear_limit_how
 
 
 def _full_well(ch: ChannelResult, pts: list, sat_level: float) -> None:
@@ -925,6 +1042,208 @@ def _drift(res: BenchResult, raw: list) -> float:
         worst = max(rep, key=lambda v: abs(v[-1].signal / v[0].signal - 1))
         return 100.0 * (worst[-1].signal / worst[0].signal - 1.0)
     return float("nan")
+
+
+def _by_order(res: BenchResult) -> list:
+    """[(order, {ch: PairStat})] for the flat pairs, in shooting order."""
+    out: dict = {}
+    for c, ch in res.channels.items():
+        for p in ch.pairs:
+            out.setdefault(p.order, {})[c] = p
+    return sorted(out.items())
+
+
+def _common_mode(res: BenchResult) -> None:
+    """A pair off the time ladder's line by the same amount in every colour, while the colours sit at clearly different
+    levels, is the light at that exposure (flicker, a step in the panel's power): a sensor bend depends on the level, so
+    it would hit the colours differently. Marked common_mode in every colour (1.0.0; 8 Nov 2026, Ladder 27Oct26)."""
+    res.common_mode = []
+    if len(res.channels) < 2:
+        return
+    for _o, by in _by_order(res):
+        ps = [p for p in by.values() if not p.saturated and p.signal > 0 and math.isfinite(p.deviation_pct)]
+        if len(ps) < 2:
+            continue
+        lv = [p.signal for p in ps]
+        if min(lv) / max(lv) > RATIO_MAX_K:
+            continue                                    # colours too alike in level to tell light from a bend
+        d = [p.deviation_pct for p in ps]
+        if min(abs(x) for x in d) <= LIN_TOL_PCT or not (all(x > 0 for x in d) or all(x < 0 for x in d)):
+            continue
+        mean = float(np.mean(np.abs(d)))
+        if max(d) - min(d) <= max(0.25 * mean, 0.3):
+            for p in by.values():
+                p.common_mode = True
+            res.common_mode.append(ps[0].exptime)
+
+
+def _ratio_linearity(res: BenchResult) -> None:
+    """The colour-ratio check (one-shot-colour cameras): in every frame the colours see the SAME light, so the ratio of
+    a dimmer colour to a brighter one cancels the panel's brightness, its drift and its steps. One sensor and one ADC
+    read every colour, so the response f(level) is one curve: the ratio (dim/bright, over its value on the straight
+    base) is f(dim level) / f(bright level). Walking up the brighter colour's level and taking f at the dimmer level
+    from the points already found (f = 1 on the base, 2–30 % of the range, as the time ladder assumes) chains the
+    ratios into the whole curve, a gentle bend included. A colour drift in time (the panel's colour changes as it
+    warms) is taken out from the repeated (reference) exposure, like the time ladder's brightness drift."""
+    res.ratio_curve, res.ratio_limit_adu, res.ratio_is_bound, res.ratio_how = [], float("nan"), False, ""
+    res.ratio_why_not, res.ratio_noise_pct = "", float("nan")
+    chans = list(res.channels)
+    if len(chans) < 3:
+        res.ratio_why_not = "a mono camera has no colours to compare"
+        return
+    if not all(math.isfinite(res.channels[c].bias_adu) for c in chans):
+        res.ratio_why_not = "the bias level is not known"
+        return
+    sat = res.saturation_adu
+    rng = {c: sat - res.channels[c].bias_adu for c in chans}
+    rows = []
+    for _o, by in _by_order(res):
+        if len(by) < len(chans) or next(iter(by.values())).exptime <= 0:
+            continue
+        ok = {c: p for c, p in by.items() if not p.saturated and p.signal > 0.02 * rng[c]}
+        if len(ok) < 2:
+            continue
+        hi = max(ok, key=lambda c: ok[c].signal)
+        lows = [c for c in ok if c != hi and ok[c].signal <= RATIO_MAX_K * ok[hi].signal]
+        if not lows:
+            continue
+        lo = min(lows, key=lambda c: ok[c].signal)                  # the most contrast: the fewest chain steps
+        rows.append((ok[hi], ok[lo], hi, lo))
+    if not rows:
+        res.ratio_why_not = (f"the colours were too alike in brightness (within {100 * (1 - RATIO_MAX_K):.0f} % of "
+                             "each other): a bend would show in both and cancel. A light with a colour cast (a warm "
+                             "panel, or paper over it) makes the check work")
+        return
+    combos = {(h, l) for _a, _b, h, l in rows}
+    rho0, refs = {}, {}
+    noise = []
+    for hc, lc in combos:
+        these = [(a, b) for a, b, h, l in rows if (h, l) == (hc, lc)]
+        # the colour drift: the ratio at the reference exposure, through time
+        _t, rp = _reference([a for a, _b in these])
+        rb = {a.order: b for a, b in these}
+        rp = [q for q in rp if q.order in rb]
+        refs[(hc, lc)] = [(q.t_mid, rb[q.order].signal / q.signal) for q in rp] if len(rp) > 1 else []
+
+        def drift(a, key=(hc, lc)):
+            r = refs[key]
+            if len(r) < 2 or len({t for t, _v in r}) < 2:
+                return 1.0
+            tr = np.array([t for t, _v in r])
+            vr = np.array([v for _t, v in r])
+            return float(np.interp(a.t_mid, tr, vr) / np.mean(vr))
+        base = [b.signal / a.signal / drift(a) for a, b in these if a.signal <= 0.30 * rng[hc]]
+        if len(base) >= 2:
+            rho0[(hc, lc)] = (float(np.median(base)), drift)
+            if len(base) >= 3:
+                med = float(np.median(base))
+                noise.append(100.0 * 1.4826 * float(np.median(np.abs(np.array(base) / med - 1.0))))
+    if noise:
+        res.ratio_noise_pct = float(np.median(noise))
+    rows = [r for r in rows if (r[2], r[3]) in rho0]
+    rows.sort(key=lambda r: r[0].mean_raw)
+    levels, devs = [], []
+    curve = []
+    for a, b, hc, lc in rows:
+        r0, drift = rho0[(hc, lc)]
+        rho = b.signal / a.signal / drift(a) / r0                    # f(lo level) / f(hi level)
+        direct = 100.0 * (rho - 1.0)
+        if a.signal <= 0.30 * rng[hc]:
+            d = 0.0                                                  # the straight base: f = 1 by definition
+        else:
+            if b.signal <= 0.30 * rng[lc]:
+                d_lo = 0.0
+            elif levels and b.mean_raw <= max(levels):
+                d_lo = float(np.interp(b.mean_raw, levels, devs))
+            else:
+                continue                                             # the dimmer level is not on the curve yet
+            d = 100.0 * ((1.0 + d_lo / 100.0) / rho - 1.0)
+        # keep the curve's points sorted by level for np.interp
+        i = int(np.searchsorted(levels, a.mean_raw))
+        levels.insert(i, a.mean_raw)
+        devs.insert(i, d)
+        curve.append({"level": round(a.mean_raw, 1), "dev_pct": round(d, 4), "direct_pct": round(direct, 4),
+                      "hi": hc, "lo": lc, "exptime": a.exptime, "t": a.t_mid, "base": a.signal <= 0.30 * rng[hc]})
+    res.ratio_curve = curve
+    above = [p for p in curve if not p["base"]]
+    if len(above) < RATIO_MIN_POINTS:
+        res.ratio_why_not = (f"only {len(above)} pair{'s' if len(above) != 1 else ''} above the straight base with "
+                             "colours far enough apart in brightness")
+        return
+    # the limit: the last level within ±LIN_TOL_PCT before the first outside it
+    last_ok, first_bad = None, None
+    for pt in sorted(curve, key=lambda q: q["level"]):
+        if abs(pt["dev_pct"]) <= LIN_TOL_PCT:
+            last_ok = pt
+        else:
+            first_bad = pt
+            break
+    if last_ok is None:
+        res.ratio_why_not = "no level on the colour-ratio curve was within tolerance"
+        return
+    res.ratio_limit_adu = float(last_ok["level"])
+    if first_bad is not None:
+        res.ratio_is_bound = False
+        res.ratio_how = (f"colour ratio: the last level within ±{LIN_TOL_PCT:g} % ({last_ok['level']:,.0f} ADU, "
+                         f"{last_ok['dev_pct']:+.2f} %); at {first_bad['level']:,.0f} ADU the sensor is off by "
+                         f"{first_bad['dev_pct']:+.2f} %")
+    else:
+        res.ratio_is_bound = True
+        top_sat = any(p.saturated for ch in res.channels.values() for p in ch.pairs
+                      if p.exptime > 0 and p.mean_raw > last_ok["level"])
+        res.ratio_how = (f"colour ratio: within ±{LIN_TOL_PCT:g} % up to the brightest unsaturated level "
+                         f"({last_ok['level']:,.0f} ADU)" + ("; the next pair saturated, so the limit is at least that"
+                                                            if top_sat else "; the limit may be higher"))
+    # the light-free curve at every pair's own level (the gain refit and the plot use it)
+    top = max(levels)
+    for ch in res.channels.values():
+        for p in ch.pairs:
+            p.sensor_dev_pct = (float(np.interp(p.mean_raw, levels, devs)) if p.exptime > 0 and not p.saturated
+                                and p.mean_raw <= top else float("nan"))
+
+
+def _light(res: BenchResult) -> None:
+    """Was the light steady? The repeated (reference) exposures, each pair's two frames, and pairs off the line alike in
+    every colour. None when nothing was repeated and nothing else gave it away."""
+    lead = max(res.channels.values(), key=lambda ch: ch.rate if math.isfinite(ch.rate) else -1)
+    t_ref, refs = _reference(lead.pairs)
+    res.ref_exptime, res.ref_n = t_ref, len(refs)
+    mism = [(abs(p.ratio - 1.0) * 100.0, p.exptime) for p in lead.pairs
+            if not p.saturated and p.signal > 0 and math.isfinite(p.ratio)]
+    res.worst_pair_pct = max((m for m, _t in mism), default=float("nan"))
+    res.unsteady_pairs = sorted({t for m, t in mism if m > STEADY_PCT})
+    shaky = bool(res.unsteady_pairs or res.common_mode)
+    if refs:
+        res.light_steady = not shaky and not (math.isfinite(res.drift_pct) and abs(res.drift_pct) > STEADY_PCT)
+    else:
+        res.light_steady = False if shaky else None
+    res.offset_trusted = res.light_steady is not False
+
+
+def _choose_limit(res: BenchResult) -> None:
+    """Which answer sets each colour's linear limit. The colour-ratio curve is light-free: with unsteady light it alone
+    decides (the time ladder cannot judge ±0.5 % then); otherwise the lower of the two, since the time ladder also
+    sees a bend the ratio might soften. A mono camera, or no colour-ratio curve: the time ladder."""
+    has_ratio = math.isfinite(res.ratio_limit_adu)
+    res.lin_method = "time ladder"
+    if not has_ratio:
+        return
+    curve_lv = [(q["level"], q["dev_pct"]) for q in res.ratio_curve]
+    for ch in res.channels.values():
+        ladder = (ch.ladder_limit_adu, ch.ladder_is_bound, ch.ladder_how)
+        ratio = (res.ratio_limit_adu, res.ratio_is_bound, res.ratio_how)
+        if res.light_steady is False or not math.isfinite(ladder[0]):
+            pick = ratio
+        else:
+            pick = min((ratio, ladder), key=lambda x: (x[0], not x[1]))
+        ch.linear_limit_adu, ch.linear_is_bound, ch.linear_limit_how = pick
+        if pick is ratio:
+            below = [abs(d) for lv, d in curve_lv if lv <= pick[0]]
+            ch.max_dev_pct = float(max(below)) if below else float("nan")
+    picks = {("colour ratio" if ch.linear_limit_how.startswith("colour ratio") else "time ladder")
+             for ch in res.channels.values()}
+    res.lin_method = "colour ratio" if picks == {"colour ratio"} else (
+        "time ladder" if picks == {"time ladder"} else "colour ratio and time ladder")
 
 
 def _findings(res: BenchResult, sc: Scan) -> None:
