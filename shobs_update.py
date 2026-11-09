@@ -29,7 +29,8 @@ EVERY_S = 24 * 3600.0            # one question a day at most
 
 def parse_version(text) -> tuple | None:
     """'v1.2.3', '1.2', 'SHOBS-FLUX 1.0.0' → (1, 2, 3) / (1, 2, 0) / (1, 0, 0); None when there is no version."""
-    m = re.search(r"(\d+)\.(\d+)(?:\.(\d+))?(?:\.(\d+))?", str(text or ""))
+    # 1–3 digits a part: a date-like tag (2026.11.09) is not a version (Fable 1.0.0)
+    m = re.search(r"(?<![\d.])v?(\d{1,3})\.(\d{1,3})(?:\.(\d{1,3}))?(?:\.(\d{1,3}))?(?![\d.])", str(text or ""))
     if not m:
         return None
     return tuple(int(g) for g in m.groups(default="0"))

@@ -1094,6 +1094,12 @@ def _ratio_linearity(res: BenchResult) -> None:
     if not all(math.isfinite(res.channels[c].bias_adu) for c in chans):
         res.ratio_why_not = "the bias level is not known"
         return
+    if not all(res.channels[c].bias_source == "measured" for c in chans):
+        # a bias error δ puts δ(1 − k)/S into the ratio, largest on the dim pairs the curve is anchored on: a linear
+        # sensor could come out "bending" (Fable review 1.0.0, MUST 2)
+        res.ratio_why_not = ("the bias level was worked out from the flats, not measured from clean bias frames; the "
+                             "colour ratio needs it to a few ADU")
+        return
     sat = res.saturation_adu
     rng = {c: sat - res.channels[c].bias_adu for c in chans}
     rows, allok = [], []
@@ -1110,6 +1116,9 @@ def _ratio_linearity(res: BenchResult) -> None:
             continue
         lo = min(lows, key=lambda c: ok[c].signal)                  # the most contrast: the fewest chain steps
         rows.append((ok[hi], ok[lo], hi, lo))
+    if not allok:
+        res.ratio_why_not = "no pair had two unsaturated colours above 2 % of the range"
+        return
     if not rows:
         res.ratio_why_not = (f"the colours were too alike in brightness (within {100 * (1 - RATIO_MAX_K):.0f} % of "
                              "each other): a bend would show in both and cancel. A light with a colour cast (a warm "
@@ -1137,9 +1146,8 @@ def _ratio_linearity(res: BenchResult) -> None:
             return float(np.interp(a.t_mid, tr, vr) / np.mean(vr))
         # the ratio's own value: from the dimmest pairs, where the response is surely straight (2–12 % of the range;
         # the straight base, 2–30 %, when too few)
+        # (no fallback to a brighter base: where the response may already bend the curve comes out soft; Fable 1.0.0)
         base = [b.signal / a.signal / drift(a) for a, b in these if a.signal <= 0.12 * rng[hc]]
-        if len(base) < 2:
-            base = [b.signal / a.signal / drift(a) for a, b in these if a.signal <= 0.30 * rng[hc]]
         if len(base) >= 2:
             rho0[(hc, lc)] = (float(np.median(base)), drift)
             if len(base) >= 3:
@@ -1148,6 +1156,10 @@ def _ratio_linearity(res: BenchResult) -> None:
     if noise:
         res.ratio_noise_pct = float(np.median(noise))
     rows = [r for r in rows if (r[2], r[3]) in rho0]
+    if not rows:
+        res.ratio_why_not = ("fewer than 2 pairs in the dimmest 12 % of the range to anchor the colour ratio on "
+                             "(shoot a few shorter exposures)")
+        return
     rows.sort(key=lambda r: r[0].mean_raw)
     levels, devs = [], []
     curve = []
@@ -1159,7 +1171,7 @@ def _ratio_linearity(res: BenchResult) -> None:
         # comes from), else from the points already found
         if b.signal <= 0.12 * rng[lc]:
             d_lo = 0.0
-        elif b.mean_raw <= max(levels):
+        elif levels and b.mean_raw <= max(levels):
             d_lo = float(np.interp(b.mean_raw, levels, devs))
         else:
             continue                                                 # the dimmer level is not on the curve yet
@@ -1250,7 +1262,10 @@ def _choose_limit(res: BenchResult) -> None:
         if res.light_steady is False or not math.isfinite(ladder[0]):
             pick = ratio
         else:
-            pick = min((ratio, ladder), key=lambda x: (x[0], not x[1]))
+            # the lower answer, except that an "at least" level at or below a measured bend does not contradict it:
+            # the measured one is then the information (Fable 1.0.0); at equal levels the measured one wins too
+            lo, hi = sorted((ratio, ladder), key=lambda x: (x[0], not x[1]))
+            pick = hi if (lo[1] and not hi[1]) else lo
         ch.linear_limit_adu, ch.linear_is_bound, ch.linear_limit_how = pick
         if pick is ratio:
             below = [abs(d) for lv, d in curve_lv if lv <= pick[0]]
@@ -1554,6 +1569,11 @@ def apply_to_profile(res: BenchResult, doc: dict | None, written_by: str, run_ke
     else:
         doc = copy.deepcopy(doc)
     doc.setdefault("values", {})
+    if "linear_limit_adu" not in vals:
+        # no linear limit this run: an old measured one must not stand in for it (a typed one stays)
+        old = doc["values"].get("linear_limit_adu")
+        if isinstance(old, dict) and old.get("source") == "measured":
+            doc["values"].pop("linear_limit_adu", None)
     for k, r in vals.items():
         old = doc["values"].get(k)
         if keep_user and isinstance(old, dict) and old.get("source") == "user":

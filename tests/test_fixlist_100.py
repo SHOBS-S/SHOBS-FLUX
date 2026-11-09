@@ -376,5 +376,52 @@ class TestWindow(TempData):
         self.assertIn(long.strip()[:60], hp.detail_var.get())
 
 
+# ---- Fable review of 1.0.0 ---------------------------------------------------------------------------------------------
+
+class TestReviewFixes(BenchCase):
+    def test_ladder_without_short_rungs_does_not_crash(self):
+        """MUST 1: the dimmest rung already puts blue above the 12 % anchor zone."""
+        ex = [2.0, 1.0, 1.1, 1.2, 1.3, 1.5, 1.7, 2.0, 2.2, 2.6, 3.0, 3.4, 3.8, 4.2, 4.6, 2.0]
+        r = self.run_ladder("noshort", exposures=ex)
+        self.assertTrue(math.isfinite(r.gain))
+
+    def test_derived_bias_no_colour_ratio(self):
+        """MUST 2: a bias worked out from the flats is a few ADU off; the colour ratio is not made from it."""
+        r = self.run_ladder("nobias", bias_pairs=0, nonlin=0.0, **UNSTEADY)
+        self.assertTrue(math.isnan(r.ratio_limit_adu))
+        self.assertIn("not measured", r.ratio_why_not)
+        self.assertEqual(r.lin_method, "time ladder")
+
+    def test_camera_wide_old_limit_cleared(self):
+        """SHOULD 3: no limit this run → the old measured camera-wide limit goes too; a typed one stays."""
+        r = self.run_ladder("steady")
+        doc = bench.apply_to_profile(r, None, "test")
+        r2 = copy.deepcopy(r)
+        r2.linear_limit_adu = float("nan")
+        for ch in r2.channels.values():
+            ch.linear_limit_adu = float("nan")
+        self.assertNotIn("linear_limit_adu", bench.apply_to_profile(r2, doc, "test")["values"])
+        doc["values"]["linear_limit_adu"] = {"value": 40000, "unit": "ADU", "source": "user"}
+        self.assertEqual(bench.apply_to_profile(r2, doc, "test")["values"]["linear_limit_adu"]["value"], 40000)
+
+    def test_measured_bend_beats_a_lower_at_least(self):
+        """SHOULD 5: ratio 'at least 40k' with a ladder bend measured at 50k (steady light) → 50k."""
+        r = copy.deepcopy(self.run_ladder("steady"))
+        r.ratio_limit_adu, r.ratio_is_bound, r.ratio_how = 40000.0, True, "colour ratio: within ±0.5 % up to …"
+        for ch in r.channels.values():
+            ch.ladder_limit_adu, ch.ladder_is_bound, ch.ladder_how = 50000.0, False, "the last pair within …"
+        bench._choose_limit(r)
+        self.assertTrue(all(ch.linear_limit_adu == 50000.0 for ch in r.channels.values()))
+        for ch in r.channels.values():
+            ch.ladder_limit_adu, ch.ladder_is_bound = 30000.0, False
+        bench._choose_limit(r)
+        self.assertTrue(all(ch.linear_limit_adu == 30000.0 for ch in r.channels.values()))
+
+    def test_date_tag_is_not_a_version(self):
+        self.assertIsNone(shobs_update.parse_version("2026.11.09"))
+        self.assertFalse(shobs_update.is_newer("2026.11.09", "1.0.0"))
+        self.assertEqual(shobs_update.parse_version("SHOBS-FLUX v1.0.1"), (1, 0, 1, 0))
+
+
 if __name__ == "__main__":
     unittest.main()
