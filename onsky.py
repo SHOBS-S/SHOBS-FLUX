@@ -361,6 +361,13 @@ def load_dataset(path_or_doc, cam_lookup=None, path: str = "") -> Dataset:
         per_unit_px = 1.0
     else:
         per_unit_px = float(n_color * soft_bin * soft_bin)
+    # raw pixels summed into one measured pixel: each carries its own read noise. SHOBS-P's averaged pixel in
+    # electrons is the same sum (per_unit_px); a FLUX folder run sums raw ADU (a TG pixel = 2 greens), so its count is
+    # in the log from 1.0.0 (raw_px_summed) and follows from the band for older logs (GitHub SHOBS-FLUX #1)
+    if meas.get("flux_is_adu_sum"):
+        raw_sum_px = _f(meas.get("raw_px_summed")) or float(n_color * soft_bin * soft_bin)
+    else:
+        raw_sum_px = per_unit_px
     e_per_unit = nums["gain"] * per_unit_px if nums["gain"] else None
     gain_used, gain_source = nums["gain"], nums["gain_source"]
     # Format 2 (SHOBS-P 2.3.0, #55): SHOBS-P writes electrons per image unit itself, per star and per frame, with
@@ -493,7 +500,7 @@ def load_dataset(path_or_doc, cam_lookup=None, path: str = "") -> Dataset:
         segment=np.array([str(f.get("segment") or "") for f in keep], dtype=object),
         cadence=doc.get("cadence") if isinstance(doc.get("cadence"), dict) else None,
         catalog_service=str(doc.get("catalog_service") or ""), n_frames_in_log=len(frames_in), precalibrated=pre,
-        e_star=e_star, raw_sum_px=per_unit_px, scale=scale, scale_note=scale_note, log_version=log_version,
+        e_star=e_star, raw_sum_px=raw_sum_px, scale=scale, scale_note=scale_note, log_version=log_version,
         star_sky=star_sky if np.isfinite(star_sky).any() else None)
     # imaging focus (guided astrophotography) is said only by a FLUX folder run; SHOBS-P's logs are photometry
     if ds.source == "SHOBS-FLUX" and str(doc.get("frames_are") or "").lower() == "imaging":

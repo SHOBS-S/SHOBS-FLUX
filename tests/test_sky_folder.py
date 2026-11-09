@@ -56,6 +56,8 @@ class TestFolderRuns(FolderCase):
         m = doc["measurement"]
         self.assertTrue(m["flux_is_adu_sum"])
         self.assertEqual((m["raw_px_per_px"], m["color"], m["debayer_mode"]), (2, "G", None))
+        self.assertEqual(m["raw_px_summed"], 2)                    # two greens per measured pixel (#1)
+        self.assertEqual(ds.raw_sum_px, 2.0)
         self.assertEqual(doc["setup"]["bayer_pattern"], "RGGB")
         self.assertEqual(doc["setup"]["camera_id"], "zwo-asi2600mc-air__g100__o50__bin1")
         self.assertEqual(doc["stars"][0]["role"], "target")

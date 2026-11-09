@@ -1150,6 +1150,7 @@ def run_folder(folder: str, channel: str = "G", step=None, catalog=None, cam_loo
              "telescop_header": key0.get("telescop_header"), "pixel_um": key0.get("pixel_um"),
              "e_per_adu_header": key0.get("e_per_adu"), "bayer_pattern": bayer if osc else None}
     measurement = {"debayer_mode": None, "software_binning": 1, "raw_px_per_px": im0.f,
+                   "raw_px_summed": im0.n_sum,            # raw pixels in one measured pixel (read noise, #1)
                    "aperture_radius_px": r_ap, "sky_inner_px": round(rin, 2), "sky_outer_px": round(rout, 2),
                    "flux_units": "raw ADU summed over the band's pixels in the aperture, sky subtracted "
                                  "(SHOBS-FLUX folder run)",
