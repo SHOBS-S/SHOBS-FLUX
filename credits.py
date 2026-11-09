@@ -8,16 +8,16 @@ LICENSE_LINE = ("SHOBS-FLUX is free software under the GNU General Public Licens
 STATUS_LINE = ("© Shiloh Hill Observatory    Methods: photon transfer (Janesick), CCD equation (Howell)    "
                "Full list: Credits and sources")
 
-# Set at the 1.0.0 release (Zenodo). The Credits page shows "How to cite" only when one is set.
+# Zenodo makes the DOI when the 1.0.0 release is archived, so 1.0.0 cites the repository; the concept DOI (all
+# versions) goes here, and in CITATION.cff, with the first build after it exists; the ASCL id once ASCL lists FLUX.
 CITATION_DOI = ""
 ASCL_ID = ""
+REPO_URL = "https://github.com/SHOBS-S/SHOBS-FLUX"
 
 
 def citation_text(version: str) -> str:
-    if not (CITATION_DOI or ASCL_ID):
-        return ""
     where = ", ".join(x for x in (f"doi:{CITATION_DOI}" if CITATION_DOI else "",
-                                  f"ascl:{ASCL_ID}" if ASCL_ID else "") if x)
+                                  f"ascl:{ASCL_ID}" if ASCL_ID else "") if x) or REPO_URL
     return (f"Armbrust, J. W., and Shiloh Hill Observatory, SHOBS-FLUX: Shiloh Hill Observatory Optical System "
             f"Characterization, version {version}, {where}")
 

@@ -1,0 +1,20 @@
+cff-version: 1.2.0
+message: "If you use SHOBS-FLUX in your work, please cite it as below."
+title: "SHOBS-FLUX: Shiloh Hill Observatory Optical System Characterization"
+type: software
+version: 1.0.0
+date-released: 2026-11-09
+authors:
+  - family-names: Armbrust
+    given-names: John William
+  - name: Shiloh Hill Observatory
+license: GPL-3.0-or-later
+repository-code: "https://github.com/SHOBS-S/SHOBS-FLUX"
+keywords:
+  - astronomy
+  - photometry
+  - photon transfer curve
+  - CCD
+  - CMOS
+  - zero point
+  - instrument characterization

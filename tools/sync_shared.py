@@ -1,4 +1,5 @@
-"""Copies the master shobs_profile.py (this repository) into SHOBS-P and SHOBS-SCHED checkouts, byte for byte.
+"""Copies the master shared modules (this repository) into SHOBS-P and SHOBS-SCHED checkouts, byte for byte:
+shobs_profile.py (the instrument profiles) and shobs_update.py (the new-version check, from FLUX 1.0.0).
 
     python tools/sync_shared.py PATH_TO_SHOBS-P [PATH_TO_SHOBS-SCHED ...]        copy
     python tools/sync_shared.py --check PATH ...                                 only compare (exit 1 when different)
@@ -13,7 +14,7 @@ import shutil
 import sys
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-MASTER = os.path.join(HERE, "shobs_profile.py")
+SHARED = ("shobs_profile.py", "shobs_update.py")
 
 
 def same(a: str, b: str) -> bool:
@@ -32,20 +33,22 @@ def main(argv: list[str]) -> int:
         return 2
     bad = 0
     for d in dests:
-        target = os.path.join(d, "shobs_profile.py")
-        if same(MASTER, target):
-            print(f"  same      {target}")
-            continue
-        if check_only:
-            print(f"  DIFFERENT {target}")
-            bad += 1
-            continue
         if not os.path.isdir(d):
             print(f"  no folder {d}")
             bad += 1
             continue
-        shutil.copyfile(MASTER, target)
-        print(f"  copied    {target}")
+        for name in SHARED:
+            master = os.path.join(HERE, name)
+            target = os.path.join(d, name)
+            if same(master, target):
+                print(f"  same      {target}")
+                continue
+            if check_only:
+                print(f"  DIFFERENT {target}")
+                bad += 1
+                continue
+            shutil.copyfile(master, target)
+            print(f"  copied    {target}")
     return 1 if bad else 0
 
 

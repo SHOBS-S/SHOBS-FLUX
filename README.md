@@ -6,10 +6,10 @@ It writes the shared instrument profiles that [SHOBS-P](https://github.com/SHOBS
 [SHOBS-SCHED](https://github.com/SHOBS-S/SHOBS-SCHED) read, so their noise models and exposure choices use your
 own system's numbers instead of guesses.
 
-> **Work in progress.** SHOBS-FLUX is being built in six milestones (0.1 to 0.6). There is no release yet: 1.0.0
-> comes when version 1 is complete and working well.
+> **Version 1.0.0**, the first release (9 November 2026). Built in milestones 0.1 to 0.6.1; every milestone's notes
+> are kept below. The user's manual comes with the release.
 
-## What works now (0.6)
+## What it does
 
 - **Check image.** Open any FITS or XISF frame. FLUX reports the sky in electrons per pixel (and per second) for each
   color, whether the exposure is sky- or read-noise-limited, saturated pixels, stars over the linear limit or
@@ -75,6 +75,33 @@ own system's numbers instead of guesses.
   ones you know, the rest are assumed and the report says so), the zero point and seeing over time with a
   before / after split, and the methods and caveats. A **shared copy** leaves out the site (latitude, longitude,
   elevation) and the file locations on your computer.
+
+## New in 1.0.0
+
+- **Linearity from the colours' ratio (one-shot-colour cameras).** In every frame the three colours see the same
+  light, so the ratio of a dimmer colour to a brighter one does not care how bright the panel was, nor how it drifted
+  or stepped during the ladder. One sensor and one ADC read every colour, so FLUX chains those ratios into one
+  response curve for the sensor and takes the linear limit from it. On 9 Nov 2026 a panel that drifted 6.9 % and
+  stepped at several rungs put the old time ladder's limit at 2,175 ADU; the colour ratio found the camera straight
+  (within ±0.5 %) to at least 60,931 ADU. It needs one colour clearly dimmer than another (a warm panel, or paper over
+  it); when the colours are too alike, or on a mono camera, the time ladder is used as before.
+- **The time ladder takes out the light's drift** from a repeated (reference) exposure, and a pair off the line by
+  the same amount in every colour is named as the light at that exposure ("repeat it"), not the end of the linear
+  range (the 1 s pair of the 27 Oct ladder).
+- **Unsteady light is said plainly:** repeated exposures that disagree, a pair whose two frames disagree, pairs off
+  the line alike in every colour. With steady light the lower of the two answers is used; with unsteady light the
+  colour ratio alone, and the exposure-timing offset is not saved from that run. The **Shooting plan** now asks for a
+  reference exposure at the start, the middle and the end, a 30-minute warm-up, and the camera off the panel.
+- **Read noise in folder runs** counts every raw pixel in a measured pixel (both greens of a TG pixel; GitHub #1). It
+  only moves the noise terms of faint stars on dark skies.
+- **New version check** (GitHub #2). At start, in the background, FLUX asks GitHub (at most once a day) whether a newer
+  release is out and, if so, says so on the status strip with a link to the release notes. Nothing about you is sent,
+  nothing is downloaded, and it is silent when there is no internet. Switch it off on the Credits and sources page.
+  Want an email for each release instead? On GitHub: **Watch → Custom → Releases**; or follow the feed
+  `https://github.com/SHOBS-S/SHOBS-FLUX/releases.atom`.
+- **History:** the Status column fits its text, and the run you pick is shown in full below the list.
+- A bench re-run that cannot find a colour's linear limit clears that colour's old measured limit (a value you typed
+  stays).
 
 ## New in 0.6.1
 
@@ -175,11 +202,10 @@ own system's numbers instead of guesses.
 
 ## Coming
 
-| Milestone | What |
+| When | What |
 | --- | --- |
-| 0.6 | SHOBS-SCHED reads the profiles; the AstroImageJ / EXOTIC / HOPS export (this build) |
-| SHOBS-P 2.4.0 | SHOBS-P reads the profiles (its reader comes with SHOBS-P 2.4.0) |
-| 1.0.0 | The full user's manual, and the release |
+| SHOBS-P 2.4.0 | SHOBS-P reads the profiles (its linear limit from FLUX, GitHub SHOBS-P #58) |
+| After 1.0.0 | Multi-field Sky folders (mosaic panels); the concept DOI in Credits once Zenodo has made it |
 
 ## Install (Windows)
 
@@ -203,6 +229,10 @@ and in the Start menu. **Run self-test.bat** checks the copy (it changes no data
 | `flux_runs.sqlite` | FLUX's run history |
 
 The profile format (version 1) is defined in `shobs_profile.py`, one file copied unchanged into all three apps.
+
+## How to cite
+
+See CITATION.cff (GitHub shows it as "Cite this repository"). The Credits and sources page gives the same line.
 
 ## License
 
