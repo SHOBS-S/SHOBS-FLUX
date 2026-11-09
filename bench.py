@@ -1096,13 +1096,14 @@ def _ratio_linearity(res: BenchResult) -> None:
         return
     sat = res.saturation_adu
     rng = {c: sat - res.channels[c].bias_adu for c in chans}
-    rows = []
+    rows, allok = [], []
     for _o, by in _by_order(res):
         if len(by) < len(chans) or next(iter(by.values())).exptime <= 0:
             continue
         ok = {c: p for c, p in by.items() if not p.saturated and p.signal > 0.02 * rng[c]}
         if len(ok) < 2:
             continue
+        allok.append(ok)
         hi = max(ok, key=lambda c: ok[c].signal)
         lows = [c for c in ok if c != hi and ok[c].signal <= RATIO_MAX_K * ok[hi].signal]
         if not lows:
@@ -1118,7 +1119,9 @@ def _ratio_linearity(res: BenchResult) -> None:
     rho0, refs = {}, {}
     noise = []
     for hc, lc in combos:
-        these = [(a, b) for a, b, h, l in rows if (h, l) == (hc, lc)]
+        # every pair where both colours were measured (not only those where this pairing was picked): a pairing taken
+        # up once the brightest colour saturates still has its own straight base and reference exposures
+        these = [(ok[hc], ok[lc]) for ok in allok if hc in ok and lc in ok]
         # the colour drift: the ratio at the reference exposure, through time
         _t, rp = _reference([a for a, _b in these])
         rb = {a.order: b for a, b in these}
@@ -1248,7 +1251,7 @@ def _choose_limit(res: BenchResult) -> None:
 
 def _exps(ts: list) -> str:
     ts = sorted(set(ts))
-    return ", ".join(f"{t:g}" for t in ts[:6]) + (f" and {len(ts) - 6} more" if len(ts) > 6 else "") + " s"
+    return ", ".join(f"{t:g}" for t in ts[:6]) + " s" + (f" and {len(ts) - 6} more" if len(ts) > 6 else "")
 
 
 def _light_findings(res: BenchResult) -> None:
