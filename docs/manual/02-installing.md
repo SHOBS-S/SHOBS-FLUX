@@ -48,8 +48,6 @@ with the reason. Install Python from python.org (tick **Add python.exe to PATH**
 again. If it says `The shortcuts could not be made. Leave this window open and copy the message above.`, the lines
 above it say why.
 
-![Create shortcuts.bat finishing: the packages checked, the shortcuts made, and "Done."](img/02-create-shortcuts.png)
-
 > **Tip:** To pin SHOBS-FLUX to the taskbar, open the Start menu, right-click **SHOBS-FLUX** and choose **Pin to
 > taskbar**.
 

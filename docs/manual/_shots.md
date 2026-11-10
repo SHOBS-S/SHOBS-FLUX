@@ -9,7 +9,6 @@ CDK1000 / Andor profile) in a picker or list that shows; the main window maximiz
 | File | Chapter | Set up before taking it |
 |---|---|---|
 | `img/01-window-parts.png` | 1 | Whole main window on the Camera page after the bench run (sidebar, page title, page, status strip). |
-| `img/02-create-shortcuts.png` | 2 | The Create shortcuts.bat console at "Done." |
 | `img/02-first-start.png` | 2 | Check image page, no frame open, status strip "Data folder: …". |
 | `img/04-check-image.png` | 3, 4 | An HD 219134 or GSC 03308 light opened, a star clicked (Star box filled). |
 | `img/05-shooting-plan.png` | 3, 5 | Shooting plan… → From one test flat… (a flat from Ladder 9Nov26). |
