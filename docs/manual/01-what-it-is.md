@@ -58,8 +58,7 @@ SHOBS-FLUX always opens on the Check image page.
 
 ## The five pages
 
-Unlike SHOBS-SCHED's steps, the pages are not done in order every time. You will visit the Camera page a few times
-a year, the Sky page after nights you reduce, and the others when you want to look something up.
+The pages are not steps to work through in order. You will visit the Camera page a few times a year, the Sky page after nights you reduce, and the others when you want to look something up.
 
 | Page | What you do there |
 |---|---|
