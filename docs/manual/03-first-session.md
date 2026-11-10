@@ -24,7 +24,7 @@ The first time, SHOBS-FLUX has no camera profile for your camera, so the camera 
 (**header**) and the maker's spec (**spec**). Press **Save as starting camera profile** to keep them. That gives
 SHOBS-SCHED something to start from until the bench run below measures the real values.
 
-![The Check image page after Open frame…: the frame with its stars ringed, the Findings on the right](img/03-check-image.png)
+![The Check image page after Open frame…: the frame with its stars ringed, the Findings on the right](img/04-check-image.png)
 
 Chapter 4 explains every line.
 
@@ -40,7 +40,7 @@ of their own. SHOBS-FLUX tells you exactly what to shoot:
    30-minute warm-up and the bias frames.
 3. Shoot the ladder with your capture program, into one folder.
 
-![The Shooting plan window: the exposure ladder worked out from one test flat](img/03-shooting-plan.png)
+![The Shooting plan window: the exposure ladder worked out from one test flat](img/05-shooting-plan.png)
 
 Then measure it:
 
@@ -54,7 +54,7 @@ Then measure it:
 7. Press **Save to camera profile…**. A window shows each value, the profile's value **Now** and the **Measured**
    value that replaces it. Press **Save**. The status strip says *✔ Camera profile … saved.*
 
-![The Camera page after a bench run: the linearity picture on the left, the Findings on the right](img/03-bench-run.png)
+![The Camera page after a bench run: the linearity picture on the left, the Findings on the right](img/05-bench-page.png)
 
 Chapter 5 explains the run: the linear limit, the two ways of finding it (the colors' ratio and the time ladder),
 what an unsteady panel looks like, and the gain in your FITS header.
@@ -75,14 +75,14 @@ in the data folder.
    elevation (m)**. The aperture and elevation are for scintillation; latitude and longitude are only needed when
    your frames do not carry the airmass. The site is never stored in a profile.
 4. Press the green **Run**. When it is done, the status strip gives the headline: for example *On-sky run: 10 nights
-   (6 photometric); zero point TG 20.60 ± 0.01, k 0.208, seeing 4.9″.*
+   (… photometric); zero point TG 20.60 ± 0.01, k 0.208, seeing 4.9″.*
 5. The list of nights says how each night was judged: **photometric** (its zero point held steady), not photometric
    (it still counts for seeing, sky and scintillation), or set aside, and why. Pick a night for its own findings and
    pictures.
 6. Press **Save to system profile…**, check the changes, and press **Save**. The status strip says *✔ System profile
    … saved.*
 
-![The Sky page after a run of SHOBS-P's on-sky logs: the nights, the zero point picture, and the Findings](img/03-sky-run.png)
+![The Sky page after a run of SHOBS-P's on-sky logs: the nights, the zero point picture, and the Findings](img/07-sky-page.png)
 
 No SHOBS-P? Choose **A folder of lights** instead and pick one night's lights of a field with catalogued stars;
 SHOBS-FLUX measures them itself. Chapter 7 has both.
