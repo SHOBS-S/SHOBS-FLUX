@@ -65,7 +65,7 @@ them, so it needs none of your data and changes none of it. Its sections are:
 | Section | What it checks |
 |---|---|
 | 1 Environment | Your Python and its packages. |
-| 2 Shared profile code | `shobs_profile.py` (the file all three SHOBS programs share) and its example profiles. |
+| 2 Shared profile code | `shobs_profile.py` (the profile code SHOBS-FLUX shares with SHOBS-P and SHOBS-SCHED) and its example profiles. |
 | 3 Reading frames and Check image | FITS and XISF reading, and the Check image measurements on synthetic frames. |
 | 3b The bench run | Gain, read noise, full well and linear limit from synthetic flat-pair ladders. |
 | 3c The dark run and the spec curves | Dark current from synthetic darks; the maker's spec curves. |

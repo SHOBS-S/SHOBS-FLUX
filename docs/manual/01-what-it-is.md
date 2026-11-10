@@ -72,8 +72,8 @@ Every page is covered in Part 2 of this manual.
 
 ## Profiles: what SHOBS-FLUX keeps
 
-SHOBS-FLUX keeps its results in **profiles**, small files in the SHOBS data folder that all three SHOBS programs
-share.
+SHOBS-FLUX keeps its results in **profiles**, small files in its data folder. If you also use SHOBS-P or SHOBS-SCHED,
+they read the same files.
 
 - A **camera profile** describes one camera at one gain, offset and binning: gain, read noise, bias level, full
   well, saturation, linear limit, dark current and the exposure-timing offset. The ASI2600MC at gain 100, offset 50,

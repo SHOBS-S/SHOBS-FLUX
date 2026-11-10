@@ -121,7 +121,7 @@ report, chapter 9), the plate scale, and per band the zero point, extinction, se
 imaging seeing, sky brightness and scintillation, and the cadence.
 
 The profiles are small JSON files in a shared format (version 1), defined in `shobs_profile.py`, one file copied
-unchanged into all three SHOBS programs. You do not need to open them; if you do, never edit them by hand while a
+unchanged into each SHOBS program, so SHOBS-P and SHOBS-SCHED read the profiles exactly as SHOBS-FLUX writes them. You do not need to open them; if you do, never edit them by hand while a
 SHOBS program is running.
 
 ---
