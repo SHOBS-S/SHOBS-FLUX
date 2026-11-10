@@ -18,7 +18,7 @@ You can stop after any step. Even step 1 alone gives SHOBS-SCHED a starting came
    - how many pixels are **saturated**, and which stars are **over the linear limit** or saturated;
    - for each star, its light in **electrons**, its **SNR** and its **FWHM** (or the size of a defocused donut);
    - the exposure at which the brightest star would reach the linear limit.
-4. Click a star on the frame, or its line in the list, for its own numbers.
+4. Click a star on the frame for its own numbers, shown in the **Star** box under the picture.
 
 The first time, SHOBS-FLUX has no camera profile for your camera, so the camera values come from the frame's header
 (**header**) and the maker's spec (**spec**). Press **Save as starting camera profile** to keep them. That gives
@@ -35,7 +35,7 @@ a steady light (a flat panel). It also needs **bias pairs**, two or more bias fr
 of their own. SHOBS-FLUX tells you exactly what to shoot:
 
 1. Open the **Camera** page. Leave **Measure** at **Gain and linearity (flat pairs)**.
-2. Press **Shooting plan…**, then **From one test flat…** and pick one flat you have shot of your panel. The plan
+2. Press **Shooting plan…**, choose **From one test flat…** and pick one flat you have shot of your panel. The plan
    lists the exposures to shoot, the reference exposure to repeat at the start, the middle and the end, the
    30-minute warm-up and the bias frames.
 3. Shoot the ladder with your capture program, into one folder.
