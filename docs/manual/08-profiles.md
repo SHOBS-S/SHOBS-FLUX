@@ -25,7 +25,8 @@ earlier revisions are kept, and its file's place on disk. The table lists every 
 | **Date** | When it was measured or typed. |
 | **Note** | How it was measured, and from what: *photon transfer curve, flat pairs*; *colour ratio (light-free), one curve for the sensor …*; *10 nights (2026-09-25 to 2026-11-08)*. |
 
-Nothing on this page changes a profile unless you press **Set a value…** or **Put it back**.
+Nothing on this page changes a profile unless you press **Set a value…** or **Put it back** (and **Save** in
+**Spec curves…** changes only spec files).
 
 **Open the data folder** opens the `.shobs` folder in Explorer.
 

@@ -56,8 +56,8 @@ SHOBS-FLUX measures the dark current two independent ways, and shows both.
   drift and all, so this way can see a fraction of an electron. It is usually the better of the two.
 
 The more precise of the two is the result. A line gives both (*The two ways in G: …*), and when they disagree a
-⚠ says so: *⚠ The darks' level rises faster than their noise* usually means light got in, or the bias level moved
-between the exposures.
+⚠ says so. *⚠ The darks' level rises faster than their noise* is most likely the bias level creeping up during the
+session, or the sensor warming (light would raise both). *⚠ The colors' darks disagree* is the sign of light getting in.
 
 **Too small to measure.** A dark current smaller than twice its own uncertainty is given as an **upper limit**:
 *✔ Dark current at −10 °C: too small to measure, at most … e⁻/px/s*. The profile is saved with that upper limit (the

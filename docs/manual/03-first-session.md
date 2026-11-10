@@ -50,7 +50,7 @@ Then measure it:
    status strip while SHOBS-FLUX works through the pairs.
 6. When it is done, the status strip gives the headline: for example *Bench run: gain 0.2571 e⁻/ADU, read noise
    1.12 e⁻; 31 flat pairs, 50 bias pairs.* The **Findings** tab says what was measured and how well; the **Values**
-   tab lists every value beside the profile's value now; the **Pairs** tab lists every flat pair.
+   tab lists every value for the camera and per color; the **Pairs** tab lists every flat pair.
 7. Press **Save to camera profile…**. A window shows each value, the profile's value **Now** and the **Measured**
    value that replaces it. Press **Save**. The status strip says *✔ Camera profile … saved.*
 
@@ -90,10 +90,10 @@ SHOBS-FLUX measures them itself. Chapter 7 has both.
 ## Step 4: see what you have
 
 Open the **Profiles** page. Pick your camera profile, then your system profile: every value with its source tag,
-its date and the run it came from. From now on:
+its date and a note on how it was measured. From now on:
 
 - **SHOBS-SCHED** reads the linear limit for its exposures, and the zero point, sky, read noise and scintillation
-  for its S/N and verdicts, which lose their "?" (chapter 8).
+  for its S/N and verdicts, which lose their "?" (chapter 1).
 - **Every night you reduce in SHOBS-P** adds an on-sky log. Run the Sky page again now and then (after a few new
   nights) and save, and your zero point, extinction and seeing keep up with your system.
 - **The History page** shows any of these values over time (chapter 9).

@@ -1,6 +1,6 @@
 # 9. History and the system report
 
-Every run SHOBS-FLUX makes goes into its **run history**: each bench run, dark run, Sky night and Check image, with
+Every run SHOBS-FLUX makes goes into its **run history**: each bench run, dark run, Check image and saved Sky night, with
 its values, its date and what it read. The History page draws any value of any setup over time, and makes the
 **system report**, one PDF of a telescope and camera.
 
@@ -61,9 +61,9 @@ then:
 
 Press **Make report…** and choose where to save it.
 
-The report's pages (seven for the Shiloh Hill system):
+The report's pages (seven for the Shiloh Hill system; the number depends on the data):
 
-1. **Summary:** the setup, the dates of the data, the key numbers.
+1. **System report** (the summary): the setup, the dates of the data, the key numbers.
 2. **Camera** (two pages, the second per color): every camera value with its source, the other values it has had (SHOBS-FLUX's own measurement beside
    one you typed, say), and the maker's spec.
 3. **On sky:** per band, the numbers and their nights plotted.

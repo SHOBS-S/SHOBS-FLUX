@@ -11,7 +11,7 @@ once for each gain setting you use, and again now and then (once a year, or afte
 
 ## What to shoot: the Shooting plan
 
-A good ladder has flats at 10 to 20 exposures, spaced from very short (a percent of the range) to a little past
+A good ladder has flats at 15 to 20 or so exposures (a run needs at least 4 different ones), spaced from very short (a percent of the range) to a little past
 saturation, with a few extra near the top where linearity bends. Two flats at each exposure make a **pair**. The
 right exposures depend on how bright your panel is, so let SHOBS-FLUX work them out:
 
@@ -57,8 +57,8 @@ near the camera's minimum, the plan says so: dim the panel, or add a layer of pa
 4. Press the green **Run**.
 
 SHOBS-FLUX reads each frame's header to sort it. A frame is a flat or a bias by its **IMAGETYP**, or by *Flat* or
-*Bias* in its file name; frames at the same exposure are paired. Frames that are neither (lights, darks) are left out
-and listed. A run needs one camera setting: frames from different gains, offsets or sizes are refused, and the
+*Bias* in its file name; frames at the same exposure are paired. Frames that are neither (lights, darks) are left out,
+with a line saying how many. A run needs one camera setting: frames from different gains, offsets or sizes are refused, and the
 message says which. If the sensor temperature changed during the ladder, a line says by how much.
 
 The busy bar runs while the pairs are measured. When it is done, the status strip gives the headline, for example
@@ -105,7 +105,7 @@ The **Findings** tab, line by line (✔ good, ⚠ needs attention, a plain note 
 The **Values** tab lists every value for the camera and per color. A **~** means worked out from the flats (no clean
 bias frames); **≥** means *at least* (no bend was seen before saturation).
 
-The **Pairs** tab lists every flat pair for the color you pick: **Exposure**, **Level** (ADU above bias), **Variance**,
+The **Pairs** tab lists every flat pair for the color you pick: **Exposure**, **Level** (raw ADU, bias included), **Variance**,
 **Sig/var**, **Off %** (off the straight line) and **Used in** (which fits the pair went into).
 
 ## The linear limit

@@ -71,7 +71,7 @@ star's light in every frame, the sky, the airmass and the seeing (chapter 7).
 
 **One-shot color (OSC).** A camera with a Bayer pattern, which records color in one frame.
 
-**Photometric night.** A night whose zero point held steady (in 10-minute bins, within 0.025 mag rms): no cloud or
+**Photometric night.** A night whose zero point held steady (in 10-minute bins, within 0.025 mag rms and 0.05 mag from lowest to highest): no cloud or
 haze.
 
 **Photon transfer curve (PTC).** The noise (variance) of flat pairs against their signal. For shot noise it is a

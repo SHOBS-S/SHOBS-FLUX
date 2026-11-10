@@ -139,6 +139,7 @@ update never touches it.
 | `specs\` | The makers' camera curves (gain, read noise and full well against the gain setting; dark current against temperature), your own copies of them. |
 | `history\` | Every earlier revision of every profile (Roll back… uses these). |
 | `onsky\` | The on-sky logs: one file per SHOBS-P reduction, and those of folder runs on the Sky page. |
+| `cache\` | Saved catalog answers from VizieR (kept 30 days), so a field asked for once works offline. |
 | `flux_runs.sqlite` | The run history: every bench, dark, Sky and Check image run, for the History page. |
 | `flux_settings.json` | SHOBS-FLUX's own settings: the last folders used, your answers to header questions, the new-version check. |
 | `flux.log` | What SHOBS-FLUX did, and any error with its details (chapter 12). |
@@ -155,8 +156,8 @@ Windows, `~/Library/Application Support/SHOBS-FLUX` on a Mac and `~/.local/share
 ## Is there a new version?
 
 When SHOBS-FLUX starts it asks GitHub, in the background and at most once a day, whether a newer release is out. If
-one is, the status strip says so (for example *SHOBS-FLUX 1.0.1 is available*) with a link to the release notes.
-Nothing about you is sent, nothing is downloaded or installed, and it says nothing when there is no internet. You
+one is, the status strip says so (for example *SHOBS-FLUX 1.0.1 is available — see the release notes*); click it for the release notes.
+Nothing about you or your data is sent (only the program's name and version), nothing is downloaded or installed, and it says nothing when there is no internet. You
 can switch it off on the **Credits and sources** page (**Check for new versions at start**).
 
 To get an email for each release instead, open the SHOBS-FLUX page on GitHub and choose **Watch → Custom →

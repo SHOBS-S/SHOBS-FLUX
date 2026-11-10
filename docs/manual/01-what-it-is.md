@@ -77,7 +77,8 @@ SHOBS-FLUX keeps its results in **profiles**, small files in the SHOBS data fold
 share.
 
 - A **camera profile** describes one camera at one gain, offset and binning: gain, read noise, bias level, full
-  well, saturation, linear limit, bias level, dark current and the exposure-timing offset. The ASI2600MC at gain 100, offset 50, bin 1 is one camera
+  well, saturation, linear limit, dark current and the exposure-timing offset. The ASI2600MC at gain 100, offset 50,
+  bin 1 is one camera
   profile; the same camera at gain 0 would be another.
 - A **system profile** describes one telescope with one camera: focal length, plate scale, and per band the zero
   point, extinction, seeing, sky brightness and scintillation.
@@ -95,7 +96,7 @@ Every value SHOBS-FLUX shows carries a small tag saying where it came from:
 | **header** | Read from the frame's FITS header (EGAIN, CCD-TEMP, FOCALLEN…). |
 | **spec** | The camera maker's figure, from the spec curves for your gain setting. |
 | **estimate** | A rough starting value, used only until something better is known. |
-| **you** | You typed it. A value you typed is kept when you save a run, unless you say otherwise. |
+| **you** | You typed it. A run you save replaces it, unless you tick **Keep the values you typed yourself** in the Save window. |
 | **worked out** | Calculated from other values (full well from the gain and the saturation level, say). |
 | **—** | Not known yet. |
 

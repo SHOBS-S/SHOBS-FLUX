@@ -43,8 +43,8 @@ When you report a problem, attach the self-test log and `flux.log`, and say what
 | *the frames are from more than one camera setting* | A run needs one gain, offset and binning. Move the others out of the folder. |
 | *the frames are not all the same size* | A subframe or a different binning slipped in. |
 | *there are no FITS or XISF frames in this folder* | The bench run reads the folder itself, not its subfolders (the dark run reads subfolders). |
-| Darks *left out: cut short* | The copy did not finish. Copy them again. |
-| Darks *shot before the cooler settled* | They were more than 1.5 °C from their set temperature. Shoot after the cooler settles. |
+| Darks left out as *cut short* | The copy did not finish. Copy them again. |
+| Darks left out because *the cooler had not settled* | They were more than 1.5 °C from their set temperature. Shoot after the cooler settles. |
 
 Chapters 5 and 6 list the findings that ask you to shoot again, and what to change.
 
@@ -70,7 +70,7 @@ Chapters 5 and 6 list the findings that ask you to shoot again, and what to chan
 To start SHOBS-FLUX's settings afresh, close it and delete `flux_settings.json` in the data folder. To start the
 whole data folder afresh, close every SHOBS program and **rename** the `.shobs` folder (to `.shobs-old`, say)
 rather than deleting it: it holds every profile and every measurement, and SHOBS-P's on-sky logs. SHOBS-FLUX makes a
-new one the first time it saves something.
+new, empty one the next time it starts.
 
 A single bad run is better taken off the History page (chapter 9), and a bad save better undone with **Roll back…**
 (chapter 8). Neither deletes anything.

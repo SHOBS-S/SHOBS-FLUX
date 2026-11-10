@@ -16,7 +16,7 @@ You see it while SHOBS-FLUX is:
 | Job | The words say, for example |
 |---|---|
 | Checking a frame (Check image) | *Checking Light_HD 219134_30.0s….fit…*, then *Reading the frame…*, *Measuring the sky…*, *Finding stars…*, *Measuring stars…* |
-| A bench run | *Bench run on Ladder 9Nov26…*, then *Reading frames… 54 of 162…* and the pairs as they are measured |
+| A bench run | *Bench run on Ladder 9Nov26…*, then *Reading headers… 10 of 162…* and *Reading frames… 54 of 162…* |
 | A dark run | *Dark run on Darks…* |
 | A Sky run of SHOBS-P's logs | *On-sky run…* |
 | A Sky run of a folder of lights | *Looking at the folder of lights…*, then *On-sky run on Lights…*: *Reading the folder…*, *Asking the star catalog…*, *Matching the stars to the catalog…*, *Writing the log…* |
@@ -50,8 +50,8 @@ The status strip along the bottom has two lines. The first is the latest news:
 - after a save, *✔ Camera profile … saved.* or *✔ System profile … saved.*;
 - when a newer release is out, *SHOBS-FLUX … is available*, with a link to its release notes (chapter 2).
 
-The second line is the credits line: *© Shiloh Hill Observatory · Methods: photon transfer (Janesick), CCD equation
-(Howell) · Full list: Credits and sources*.
+The second line is the credits line: *© Shiloh Hill Observatory    Methods: photon transfer (Janesick), CCD
+equation (Howell)    Full list: Credits and sources*.
 
 ## Common messages
 

@@ -38,14 +38,14 @@ an open cluster). Then:
   pictures. An imaging run's star size is kept apart as *Seeing, imaging focus*, never mixed with photometry seeing.
   Its zero point, extinction and sky count as usual.
 
-SHOBS-FLUX measures the folder itself and writes the same kind of on-sky log, so both sources are learned from in
+SHOBS-FLUX measures the folder itself and, when you save, writes the same kind of on-sky log, so both sources are learned from in
 exactly the same way. It uses the frames' plate solution (ASIAIR writes one); without one it matches the first frame
 to the catalog by itself, from the RA and Dec, pixel size and focal length in the header. It asks VizieR for the
 field's catalog magnitudes once (APASS DR9, and Gaia DR3 for the rest), so this needs the internet. Every light is
 measured; only a folder of more than 600 lights is cut down, to runs of frames in a row spread through the night. A
 frame whose stars cannot be found, or where fewer than 30 % of them show (clouds), is left out with a line saying so.
 
-A folder run is a look until you **Save** it: only a saved folder run goes into the run history.
+A run, of either source, is a look until you **Save** it: only saved nights go into the run history.
 
 ## The setup and the telescope
 
@@ -77,13 +77,17 @@ in the reduction (comp, check or none), but never the target. Stars are **set as
   the frames;
 - their **catalog magnitude disagrees** with the rest by more than 0.15 mag and 4 robust sigma (a wrong catalog value,
   or two stars blended);
-- they **vary**: their own scatter is more than three times the rest's.
+- they **vary**: their own scatter is more than three times the rest's;
+- they were measured in **too few frames**, or are **too faint to help**.
 
 The frames' zero points are then fitted against airmass: ZP(X) = ZP₁ − k (X − 1).
 
 **Photometric?** A night is **photometric** when its zero point holds steady: the fit's residuals, in 10-minute
-bins, stay within 0.025 mag rms. Thin cloud or haze moves them. Photon noise and scintillation average out in the
-bins, so a noisy but clear night still passes. A night that just fails is **marginal**.
+bins, stay within 0.025 mag rms, and the lowest and highest bins are within 0.05 mag of each other. Thin cloud or
+haze moves them. Photon noise and scintillation average out in the bins, so a noisy but clear night still passes.
+The test needs at least three bins and ten frames; a shorter night is *too short to judge*. A night that passes but
+whose zero point climbed or fell steadily by 0.03 mag or more through the night is **marginal**: it is used for the
+zero point and extinction only when there is no clean photometric night.
 
 **What each night counts for.**
 
@@ -92,8 +96,9 @@ bins, so a noisy but clear night still passes. A night that just fails is **marg
 - The **extinction** needs an airmass span of at least 0.25 in the night and a sensible slope. A night without one
   uses the profile's measured k, or a typical value for the band, and says which.
 - **Seeing, sky, scintillation and the time between frames** count from every usable night, photometric or not.
-- **Seeing** is kept apart for defocused nights. A night is **defocused** when its median FWHM is over 7″ or more
-  than 2.2 times the night's best in-focus run; when the same night also has an in-focus run, the defocus is named
+- **Seeing** is kept apart for defocused nights. A night is **defocused** when its stars are much bigger than the
+  same setup's in-focus nights (more than 2.2 times the night's best in-focus run, or matching a defocus already
+  known; 7″ is the rule only when there is nothing to compare with); when the same night also has an in-focus run, the defocus is named
   by the focuser offset (*defocus +125*).
 - **Sky brightness** comes from the darkest nights (Moon under 25 % lit) when there are any.
 - **The time between frames** is the **lowest** run's: a delay set in the capture program only ever adds.
