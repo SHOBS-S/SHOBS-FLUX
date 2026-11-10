@@ -20,7 +20,8 @@ right exposures depend on how bright your panel is, so let SHOBS-FLUX work them 
 3. In the **Bench ladder: shooting plan** window, choose **From one test flat…** and pick it. (After a run, choose
    **From this bench run** to plan the next ladder from the run on screen instead.)
 
-The plan reads like this (your numbers will differ):
+The plan opens with what it was worked out from (*From the test flat … (10 s; bias taken as 500 ADU from
+the OFFSET)*) and the camera settings to keep, then reads like this (your exposures will differ):
 
 1. **Bias:** panel off, scope capped, the shortest exposure the camera allows, 40 frames (20 pairs).
 2. **Reference:** panel on and left on 30 minutes first; 2 flats at the reference exposure.

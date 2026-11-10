@@ -64,8 +64,8 @@ The site is never stored in a profile: each SHOBS program keeps its own.
 ## Running it
 
 Press the green **Run**. The busy bar runs while the logs (or the folder) are read and judged. The status strip
-gives the headline, for example *On-sky run: 10 nights (… photometric); zero point TG 20.60 ± 0.01, k 0.208, seeing
-4.9″.*
+gives the headline, for example *On-sky run: 23 nights (13 photometric); zero point TG 20.61 ± 0.01, k 0.208, seeing
+4.8″.*
 
 ## How nights are judged
 

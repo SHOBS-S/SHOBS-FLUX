@@ -7,7 +7,7 @@ its values, its date and what it read. The History page draws any value of any s
 Use it to answer questions like: *Is my zero point falling?* (dirty mirrors, a dewed corrector, a failing coating)
 *Did the collimation help the seeing?* *Has my camera's read noise changed?* *What is the sky like here in winter?*
 
-![The History page: the zero point of the iOptron 14 RC over two months, with the profile's value and an event date](img/09-history-page.png)
+![The History page: the zero point of the iOptron 14 RC over two months, with the profile's value and an example event date (20 Oct)](img/09-history-page.png)
 
 ## Picking what to see
 
@@ -61,10 +61,10 @@ then:
 
 Press **Make report…** and choose where to save it.
 
-The report's pages:
+The report's pages (seven for the Shiloh Hill system):
 
 1. **Summary:** the setup, the dates of the data, the key numbers.
-2. **Camera:** every camera value with its source, the other values it has had (SHOBS-FLUX's own measurement beside
+2. **Camera** (two pages, the second per color): every camera value with its source, the other values it has had (SHOBS-FLUX's own measurement beside
    one you typed, say), and the maker's spec.
 3. **On sky:** per band, the numbers and their nights plotted.
 4. **Throughput:** your measured zero point against the **photon budget**: how many photons a star of a given

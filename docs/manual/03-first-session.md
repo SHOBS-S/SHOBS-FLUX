@@ -74,8 +74,8 @@ in the data folder.
 3. Under **Telescope**, type its name (for example *iOptron 14 RC*), its **Aperture (mm)** and your **Site
    elevation (m)**. The aperture and elevation are for scintillation; latitude and longitude are only needed when
    your frames do not carry the airmass. The site is never stored in a profile.
-4. Press the green **Run**. When it is done, the status strip gives the headline: for example *On-sky run: 10 nights
-   (… photometric); zero point TG 20.60 ± 0.01, k 0.208, seeing 4.9″.*
+4. Press the green **Run**. When it is done, the status strip gives the headline: for example *On-sky run: 23 nights
+   (13 photometric); zero point TG 20.61 ± 0.01, k 0.208, seeing 4.8″.*
 5. The list of nights says how each night was judged: **photometric** (its zero point held steady), not photometric
    (it still counts for seeing, sky and scintillation), or set aside, and why. Pick a night for its own findings and
    pictures.

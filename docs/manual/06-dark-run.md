@@ -39,7 +39,9 @@ A line says how many were read of how many found.
 3. Leave **Region** at **Central 25 %** (amp glow at the edges stays out of the dark current; the edge glow is
    measured separately on whole frames) and press the green **Run**.
 
-The status strip gives the headline, for example *Dark run: dark current at −10 °C 0.000483 ± 0.000020 e⁻/px/s; 8
+The results fill the **Findings**, **Values** and **Exposures** tabs (the Camera page's third tab is
+**Exposures** for a dark run: for each exposure its **Frames**, **Level** in ADU with its **±**, **Var e⁻²** from one
+pair, the sensor **°C** and when it was **Shot**). The status strip gives the headline, for example *Dark run: dark current at -10 °C 0.00043 ± 0.000022 e⁻/px/s; 80
 darks, 16 bias frames.*
 
 ## Two ways to the dark current

@@ -100,7 +100,8 @@ dark current is read at the profile's sensor temperature; the plate scale is tha
 camera profile alone has no telescope, so it has no plate scale (unless exactly one system profile uses that
 camera).
 
-**Copy to the clipboard** copies it all; **Save as .txt…** keeps a copy.
+As soon as the window opens, it is all on the clipboard (*✔ Copied to the clipboard.*), so whatever was on the
+clipboard before is replaced. **Copy to the clipboard** copies it again; **Save as .txt…** keeps a copy.
 
 > **Tip:** This is where the measured gain goes into AstroImageJ. It reads EGAIN from the header otherwise, and the
 > header's figure is the driver's, not your camera's (chapter 5).
