@@ -1,5 +1,6 @@
 """Copies the master shared modules (this repository) into SHOBS-P and SHOBS-SCHED checkouts, byte for byte:
-shobs_profile.py (the instrument profiles) and shobs_update.py (the new-version check, from FLUX 1.0.0).
+shobs_profile.py (the instrument profiles) and shobs_update.py (the new-version check; since FLUX 1.0.1 this copy
+is the SCHED 1.4.1 / SHOBS-P 2.3.3 one with the Highlights, byte-identical in all three).
 
     python tools/sync_shared.py PATH_TO_SHOBS-P [PATH_TO_SHOBS-SCHED ...]        copy
     python tools/sync_shared.py --check PATH ...                                 only compare (exit 1 when different)

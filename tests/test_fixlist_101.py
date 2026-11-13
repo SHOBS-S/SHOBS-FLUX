@@ -150,12 +150,18 @@ class Window(TempData):
         app.open_update()
         self.assertEqual(self.opened[-1], note["url"])
         # the Credits page checkbox: off clears the note, saved at once; a check still running says nothing then
+        app.show_update(note)
+        app.open_update()
+        app.update()
+        win = app._new_version_win.win
         app.show_credits()
         cp = app.credits_page
         cp.check_var.set(False)
         cp.set_check()
         self.assertEqual(app.update_var.get(), "")
         self.assertFalse(settings.load()["check_updates"])
+        self.assertEqual(app.update_url, "")
+        self.assertFalse(win.winfo_exists())
         app.show_update(note)
         self.assertEqual(app.update_var.get(), "")
 

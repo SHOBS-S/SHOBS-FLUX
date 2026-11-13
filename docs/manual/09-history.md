@@ -1,6 +1,6 @@
 # 9. History and the system report
 
-Every run SHOBS-FLUX makes goes into its **run history**: each bench run, dark run, Check image and saved Sky night, with
+Each bench run, dark run and Check image, and each Sky night you save, goes into SHOBS-FLUX's **run history**, with
 its values, its date and what it read. The History page draws any value of any setup over time, and makes the
 **system report**, one PDF of a telescope and camera.
 

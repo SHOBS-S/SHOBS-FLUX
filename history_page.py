@@ -1,4 +1,4 @@
-"""The History page (0.5): every run FLUX has made, and any value of any setup over time.
+"""The History page (0.5): the runs in FLUX's history (Check images, bench and dark runs, saved Sky nights), and any value of any setup over time.
 
 Top: the setup (a system = telescope + camera, or a camera on its own), the value, the dates, and an optional event
 date (a mirror cleaning, a collimation) to compare before and after. Export PNG (stamped with the date-time group)

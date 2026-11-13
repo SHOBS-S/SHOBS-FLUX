@@ -39,7 +39,7 @@ SUBTITLES = {
     "Sky": "Learns from your nights (SHOBS-P's on-sky logs or a folder of lights): zero point, extinction, seeing, "
            "sky brightness, scintillation and cadence per band, judging each night, into your system profile.",
     "Profiles": "The camera and system profiles SHOBS-P and SHOBS-SCHED read, value by value with its source.",
-    "History": "Any value of any setup over time, from every run FLUX has made; export the plot or its numbers, and "
+    "History": "Any value of any setup over time, from the runs in FLUX's history; export the plot or its numbers, and "
                "make a system report of a telescope + camera.",
 }
 SOURCE_TAG = {"measured": "measured", "header": "header", "spec": "spec", "estimate": "estimate", "user": "you",
@@ -963,6 +963,21 @@ class NewVersionWindow:
             self.win.bind("<Escape>", lambda _e: self.close())
         except tk.TclError:
             pass
+        self._place()
+
+    def _place(self):
+        """Over the middle of the main window, kept on the screen."""
+        try:
+            self.win.update_idletasks()
+            w, h = self.win.winfo_reqwidth(), self.win.winfo_reqheight()
+            x = self.app.winfo_rootx() + max(0, (self.app.winfo_width() - w) // 2)
+            y = self.app.winfo_rooty() + max(0, (self.app.winfo_height() - h) // 3)
+            sw, sh = self.app.winfo_screenwidth(), self.app.winfo_screenheight()
+            if 0 <= self.app.winfo_rootx() < sw and 0 <= self.app.winfo_rooty() < sh:   # primary screen only
+                x, y = min(max(0, x), max(0, sw - w)), min(max(0, y), max(0, sh - h - 40))
+            self.win.geometry(f"+{x}+{y}")
+        except tk.TclError:
+            pass
 
     def open_page(self):
         self.app.open_release(self.note.get("url"))
@@ -1023,8 +1038,7 @@ class CreditsPage:
         self.app.prefs["check_updates"] = bool(self.check_var.get())
         settings.save(self.app.prefs)
         if not self.check_var.get():
-            self.app.update_var.set("")
-            self.app.update_note = {}
+            self.app.clear_update()
 
     def back(self):
         self.app.show_page(self.app.page_index if self.app.page_index is not None else 0)
@@ -1125,9 +1139,19 @@ class App(tk.Tk):
         else:
             self.open_release()
 
+    def clear_update(self):
+        """The check was switched off: the note, its link and an open New version window all go."""
+        self.update_var.set("")
+        self.update_note = {}
+        self.update_url = ""
+        w = getattr(self, "_new_version_win", None)
+        if w is not None:
+            w.close()
+            self._new_version_win = None
+
     def open_release(self, url: str | None = None):
         url = url or self.update_url
-        if url:
+        if url and str(url).startswith("https://github.com/"):     # as fetch_latest only keeps github.com pages
             import webbrowser
             try:
                 webbrowser.open(url)
