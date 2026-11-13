@@ -41,7 +41,7 @@ What it does **not** do:
 SHOBS-FLUX has one main window. The blue sidebar on the left reads **Shiloh Hill / Observatory / Optical System /
 Characterization**, with **(SHOBS-FLUX)** under it and the line *Measures your camera and telescope, and keeps
 their numbers for SHOBS-P and SHOBS-SCHED*. Below that are the five pages, and at the bottom **Credits and sources**
-and the version number (**Version 1.0.0**).
+and the version number (**Version 1.0.1**).
 
 ![The SHOBS-FLUX window: the sidebar with the five pages, the white page area with its title, and the status strip along the bottom](img/01-window-parts.png)
 

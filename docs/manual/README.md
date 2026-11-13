@@ -1,9 +1,9 @@
-# SHOBS-FLUX User's Manual (version 1.0.0)
+# SHOBS-FLUX User's Manual (version 1.0.1)
 
 **Shiloh Hill Observatory Optical System Characterization (SHOBS-FLUX)**
 *Measures your camera and telescope, and keeps their numbers for SHOBS-P and SHOBS-SCHED.*
 
-> First edition, November 2026. Written for SHOBS-FLUX 1.0.0 and checked against the program; the screenshots are
+> 1.0.1 edition, November 2026 (first edition: 1.0.0). Written for SHOBS-FLUX 1.0.1 and checked against the program; the screenshots are
 > real captures from SHOBS-FLUX on Windows, with the Shiloh Hill Observatory's own camera, telescope and nights.
 > Each chapter is its own file in this folder; this page is the table of contents.
 
