@@ -8,9 +8,9 @@ LICENSE_LINE = ("SHOBS-FLUX is free software under the GNU General Public Licens
 STATUS_LINE = ("© Shiloh Hill Observatory    Methods: photon transfer (Janesick), CCD equation (Howell)    "
                "Full list: Credits and sources")
 
-# Zenodo makes the DOI when the 1.0.0 release is archived, so 1.0.0 cites the repository; the concept DOI (all
-# versions) goes here, and in CITATION.cff, with the first build after it exists; the ASCL id once ASCL lists FLUX.
-CITATION_DOI = ""
+# FLUX's Zenodo concept DOI (all versions; resolves to the newest), made when 1.0.0 was archived (10 Nov 2026); in
+# CITATION.cff and the README badge too. The ASCL id once ASCL lists FLUX.
+CITATION_DOI = "10.5281/zenodo.24115980"
 ASCL_ID = ""
 REPO_URL = "https://github.com/SHOBS-S/SHOBS-FLUX"
 

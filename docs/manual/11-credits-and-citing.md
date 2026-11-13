@@ -4,7 +4,7 @@
 
 Press **Credits and sources** at the bottom of the sidebar. The page lists:
 
-- the version and copyright (*SHOBS-FLUX 1.0.0   © 2026 Shiloh Hill Observatory*);
+- the version and copyright (*SHOBS-FLUX 1.0.1   © 2026 Shiloh Hill Observatory*);
 - **Check for new versions at start (asks GitHub once a day; never downloads anything)**, the switch for the
   new-version check (chapter 2);
 - the license line;
@@ -40,10 +40,11 @@ If SHOBS-FLUX's numbers go into your work (a paper, an AAVSO or ExoClock report,
 gives the line to use:
 
 > Armbrust, J. W., and Shiloh Hill Observatory, SHOBS-FLUX: Shiloh Hill Observatory Optical System
-> Characterization, version 1.0.0, https://github.com/SHOBS-S/SHOBS-FLUX
+> Characterization, version 1.0.1, doi:10.5281/zenodo.24115980
 
-From the next version it will carry SHOBS-FLUX's Zenodo DOI (which Zenodo makes when 1.0.0 is archived) and, once
-listed, its ASCL entry. The repository's `CITATION.cff` gives the same; GitHub shows it as **Cite this repository**.
+The DOI is SHOBS-FLUX's Zenodo concept DOI: it stands for every version and resolves to the newest. Once ASCL lists
+SHOBS-FLUX, its ASCL entry is added to the line. The repository's `CITATION.cff` gives the same; GitHub shows it as
+**Cite this repository**.
 
 Please also cite the catalogs and methods your numbers rest on: for a zero point, APASS DR9 and Gaia DR3; for gain
 and read noise, Janesick's *Photon Transfer*.

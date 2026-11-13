@@ -1,4 +1,4 @@
-"""The History page (0.5): every run FLUX has made, and any value of any setup over time.
+"""The History page (0.5): the runs in FLUX's history (Check images, bench and dark runs, saved Sky nights), and any value of any setup over time.
 
 Top: the setup (a system = telescope + camera, or a camera on its own), the value, the dates, and an optional event
 date (a mirror cleaning, a collimation) to compare before and after. Export PNG (stamped with the date-time group)
@@ -239,9 +239,12 @@ class HistoryPage:
         self.pic = ttk.Frame(self.pane, style="Card.TFrame")
         self.pane.add(self.pic, weight=3)
         self.hint = ttk.Label(self.pic, style="Hint.TLabel", justify=tk.LEFT,
-                              text="Pick a setup and a value. Every run FLUX makes goes into the history: bench and "
-                                   "dark runs for a camera, every night the Sky page reads for a telescope + camera.")
-        self.hint.pack(anchor="nw")
+                              text="Pick a setup and a value. A camera's history holds its checks, bench and dark runs; a "
+                                   "telescope + camera's holds the Sky nights you save (Save to system profile…), "
+                                   "not every Sky run.")
+        self.hint.pack(anchor="nw", fill=tk.X)
+        from flux_app import follow_wrap
+        follow_wrap(self.hint, self.pic, px(app, 10))       # 1.0.1: wraps, never widens the page
         lower = ttk.Frame(self.pane, style="Card.TFrame")
         self.pane.add(lower, weight=2)
         bar = ttk.Frame(lower, style="Card.TFrame")

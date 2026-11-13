@@ -1,6 +1,6 @@
 """SHOBS-FLUX run history: one SQLite database (flux_runs.sqlite in the SHOBS data folder).
 
-Every run FLUX makes (a Check image, later a bench run, darks, an on-sky run) is one row in runs, with its inputs and
+Every run FLUX keeps (a Check image, a bench run, darks, a saved Sky night) is one row in runs, with its inputs and
 results as JSON; every value a run measures is one row in run_values, so the History page (M5) can plot any value
 over time and trace it back to its run. SHOBS-P's on-sky log files are recorded in onsky_files when FLUX reads them,
 so no night is counted twice.

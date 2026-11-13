@@ -1,4 +1,10 @@
-# Screenshots (SHOBS-FLUX manual, 1.0.0 edition)
+# Screenshots (SHOBS-FLUX manual, 1.0.1 edition)
+
+**1.0.1 (13 Nov 2026):** retaken from 1.0.1 with the same driver and the same copy of `.shobs` (Take FLUX shots.bat
+bench history credits): `01-window-parts.png` (= the new bench-page capture; sidebar Version 1.0.1),
+`09-history-page.png` (new page subtitle) and `11-credits-page.png` (1.0.1, cite line with the concept DOI). The other
+14 are the 1.0.0 shots (John's choice: only their sidebar version label differs). `05-bench-page.png` stays the 1.0.0
+capture, so it is no longer byte-identical to `01-window-parts.png`.
 
 All new for 1.0.0, taken on Windows from SHOBS-FLUX 1.0.0 running on a COPY of the Shiloh Hill Observatory's data
 folder (`SHOBS_DATA_HOME`), so saves, roll-backs and "take off the page" in the shots never touch the real profiles.

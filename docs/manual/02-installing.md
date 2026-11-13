@@ -138,7 +138,7 @@ update never touches it.
 | `history\` | Every earlier revision of every profile (Roll back… uses these). |
 | `onsky\` | The on-sky logs: one file per SHOBS-P reduction, and those of folder runs on the Sky page. |
 | `cache\` | Saved catalog answers from VizieR (kept 30 days), so a field asked for once works offline. |
-| `flux_runs.sqlite` | The run history: every bench, dark, Sky and Check image run, for the History page. |
+| `flux_runs.sqlite` | The run history: every bench run, dark run and Check image, and each Sky night you save, for the History page. |
 | `flux_settings.json` | SHOBS-FLUX's own settings: the last folders used, your answers to header questions, the new-version check. |
 | `flux.log` | What SHOBS-FLUX did, and any error with its details (chapter 12). |
 
@@ -154,9 +154,15 @@ Windows, `~/Library/Application Support/SHOBS-FLUX` on a Mac and `~/.local/share
 ## Is there a new version?
 
 When SHOBS-FLUX starts it asks GitHub, in the background and at most once a day, whether a newer release is out. If
-one is, the status strip says so (for example *SHOBS-FLUX 1.0.1 is available — see the release notes*); click it for the release notes.
-Nothing about you or your data is sent (only the program's name and version), nothing is downloaded or installed, and it says nothing when there is no internet. You
-can switch it off on the **Credits and sources** page (**Check for new versions at start**).
+one is, a note at the right of the status strip says so, with the release's first highlight when its notes have
+some (for example *SHOBS-FLUX 1.0.2 is available: … — click for details*; on a narrow window just *… is available —
+click for details*). Click the note: a small **New version** window gives the version and its date, what's new, an
+**Open release page** button (the zip and the manual are there) and **Close**. A release with no highlights opens its
+release page straight away (*… is available — see the release notes*).
+
+Nothing about you or your data is sent (only the program's name and version), nothing is downloaded or installed, and
+it says nothing when there is no internet. You can switch it off on the **Credits and sources** page (**Check for new
+versions at start**); unticking it clears the note at once, and ticking it again brings the note back at the next start.
 
 To get an email for each release instead, open the SHOBS-FLUX page on GitHub and choose **Watch → Custom →
 Releases**, or follow the feed `https://github.com/SHOBS-S/SHOBS-FLUX/releases.atom`.

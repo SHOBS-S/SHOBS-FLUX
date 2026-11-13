@@ -15,7 +15,9 @@ import sys
 import threading
 import traceback
 import tkinter as tk
+from datetime import date
 from tkinter import filedialog, simpledialog, ttk
+from tkinter import font as tkfont
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, APP_DIR)
@@ -37,7 +39,7 @@ SUBTITLES = {
     "Sky": "Learns from your nights (SHOBS-P's on-sky logs or a folder of lights): zero point, extinction, seeing, "
            "sky brightness, scintillation and cadence per band, judging each night, into your system profile.",
     "Profiles": "The camera and system profiles SHOBS-P and SHOBS-SCHED read, value by value with its source.",
-    "History": "Any value of any setup over time, from every run FLUX has made; export the plot or its numbers, and "
+    "History": "Any value of any setup over time, from the runs in FLUX's history; export the plot or its numbers, and "
                "make a system report of a telescope + camera.",
 }
 SOURCE_TAG = {"measured": "measured", "header": "header", "spec": "spec", "estimate": "estimate", "user": "you",
@@ -918,6 +920,76 @@ class RollbackDialog(tk.Toplevel):
 
 # ---- Credits -------------------------------------------------------------------------------------------------------
 
+class NewVersionWindow:
+    """1.0.1 (GitHub #2): what the newer release brings (its notes' Highlights), with Open release page and Close.
+    It never downloads or installs anything: the release page has the zip and the manual. Same window as
+    SHOBS-SCHED 1.4.1's and SHOBS-P 2.3.3's."""
+
+    def __init__(self, app, note: dict):
+        self.app, self.note = app, note
+        self.win = tk.Toplevel(app)
+        self.win.title("New version")
+        self.win.configure(bg=style.CARD)
+        self.win.transient(app)
+        body = ttk.Frame(self.win, style="Card.TFrame", padding=px(app, 16))
+        body.pack(fill=tk.BOTH, expand=True)
+        when = note.get("published") or ""
+        try:
+            when = date.fromisoformat(when).strftime("%d %b %Y") if when else ""
+        except ValueError:
+            pass
+        ttk.Label(body, text=f"{note.get('app') or settings.APP_NAME} {note.get('version') or note.get('tag')} is "
+                             f"available" + (f" (released {when})" if when else ""), style="Section.TLabel").grid(
+            row=0, column=0, sticky="w")
+        ttk.Label(body, text=f"You have {settings.APP_VERSION}. What's new:", style="Card.TLabel").grid(
+            row=1, column=0, sticky="w", pady=(px(app, 4), px(app, 2)))
+        r = 2
+        self.lines = []
+        for h in note.get("highlights") or []:
+            ttk.Label(body, text=f"\u2022  {h}", style="Card.TLabel", justify=tk.LEFT, wraplength=px(app, 440)).grid(
+                row=r, column=0, sticky="w", padx=(px(app, 6), 0), pady=px(app, 1))
+            self.lines.append(h)
+            r += 1
+        ttk.Label(body, text="The release page has the full notes, the zip and the user's manual. Install it the way "
+                             "you installed this one; your profiles and run history are kept.", style="Hint.TLabel",
+                  justify=tk.LEFT, wraplength=px(app, 440)).grid(row=r, column=0, sticky="w", pady=(px(app, 8), 0))
+        r += 1
+        btns = ttk.Frame(body, style="Card.TFrame")
+        btns.grid(row=r, column=0, sticky="w", pady=(px(app, 10), 0))
+        self.open_btn = style.green_button(btns, "Open release page", self.open_page)
+        self.open_btn.pack(side=tk.LEFT)
+        ttk.Button(btns, text="Close", command=self.close).pack(side=tk.LEFT, padx=(px(app, 8), 0))
+        try:
+            self.win.bind("<Escape>", lambda _e: self.close())
+        except tk.TclError:
+            pass
+        self._place()
+
+    def _place(self):
+        """Over the middle of the main window, kept on the screen."""
+        try:
+            self.win.update_idletasks()
+            w, h = self.win.winfo_reqwidth(), self.win.winfo_reqheight()
+            x = self.app.winfo_rootx() + max(0, (self.app.winfo_width() - w) // 2)
+            y = self.app.winfo_rooty() + max(0, (self.app.winfo_height() - h) // 3)
+            sw, sh = self.app.winfo_screenwidth(), self.app.winfo_screenheight()
+            if 0 <= self.app.winfo_rootx() < sw and 0 <= self.app.winfo_rooty() < sh:   # primary screen only
+                x, y = min(max(0, x), max(0, sw - w)), min(max(0, y), max(0, sh - h - 40))
+            self.win.geometry(f"+{x}+{y}")
+        except tk.TclError:
+            pass
+
+    def open_page(self):
+        self.app.open_release(self.note.get("url"))
+        self.close()
+
+    def close(self):
+        try:
+            self.win.destroy()
+        except tk.TclError:
+            pass
+
+
 class CreditsPage:
     title = "Credits and sources"
     subtitle = "The methods, designs and libraries this app uses, with the citation each asks for."
@@ -966,7 +1038,7 @@ class CreditsPage:
         self.app.prefs["check_updates"] = bool(self.check_var.get())
         settings.save(self.app.prefs)
         if not self.check_var.get():
-            self.app.update_var.set("")
+            self.app.clear_update()
 
     def back(self):
         self.app.show_page(self.app.page_index if self.app.page_index is not None else 0)
@@ -1017,16 +1089,72 @@ class App(tk.Tk):
         shobs_update.start(self, settings.APP_NAME, settings.REPO, settings.APP_VERSION, self.prefs, settings.save,
                            self.show_update)
 
-    def show_update(self, note: dict):
-        self.update_url = note.get("url") or ""
-        self.update_var.set(note.get("text") or "")
-        settings.log(f"new version: {note.get('tag')} ({self.update_url})")
+    UPDATE_STATUS_ROOM = 640       # px kept for the status message beside the note (as SHOBS-SCHED)
 
-    def open_release(self):
-        if self.update_url:
+    def show_update(self, note: dict):
+        if not self.prefs.get("check_updates", True):
+            return                                     # unticked while the check ran
+        self.update_note = dict(note or {})
+        self.update_url = self.update_note.get("url") or ""
+        self._fit_update_note()
+        settings.log(f"new version: {self.update_note.get('tag')} ({self.update_url})")
+
+    def _fit_update_note(self, _e=None):
+        """The note with its highlight when the strip has room for it beside the status message, else the short
+        form ("… is available — click for details"); the New version window always lists the highlights."""
+        note = self.update_note
+        if not note:
+            return
+        full = note.get("text") or ""
+        short = (f"{note.get('app') or settings.APP_NAME} {note.get('version') or note.get('tag')} is available — "
+                 + ("click for details" if note.get("highlights") else "see the release notes"))
+        try:
+            room = int(self.winfo_width()) - px(self, self.UPDATE_STATUS_ROOM)
+            f = getattr(self, "_update_font", None)
+            if f is None:
+                f = self._update_font = tkfont.Font(self, font=style.font(10, "underline"))
+            text = full if f.measure(full) <= room else short
+        except Exception:
+            text = short
+        if self.update_var.get() != text:
+            self.update_var.set(text)
+        if not getattr(self, "_update_fit_bound", False):
+            self._update_fit_bound = True
+            self.bind("<Configure>", lambda e: self._fit_update_note() if e.widget is self else None, add="+")
+
+    def open_update(self):
+        """A click on the note: the New version window when the release has highlights, else the release page."""
+        note = self.update_note
+        if not note:
+            return
+        if note.get("highlights"):
+            w = getattr(self, "_new_version_win", None)
+            try:
+                if w is not None and w.win.winfo_exists():
+                    w.win.lift()
+                    return
+            except tk.TclError:
+                pass
+            self._new_version_win = NewVersionWindow(self, note)
+        else:
+            self.open_release()
+
+    def clear_update(self):
+        """The check was switched off: the note, its link and an open New version window all go."""
+        self.update_var.set("")
+        self.update_note = {}
+        self.update_url = ""
+        w = getattr(self, "_new_version_win", None)
+        if w is not None:
+            w.close()
+            self._new_version_win = None
+
+    def open_release(self, url: str | None = None):
+        url = url or self.update_url
+        if url and str(url).startswith("https://github.com/"):     # as fetch_latest only keeps github.com pages
             import webbrowser
             try:
-                webbrowser.open(self.update_url)
+                webbrowser.open(url)
             except Exception:
                 pass
 
@@ -1081,9 +1209,10 @@ class App(tk.Tk):
         # a newer release (shobs_update.py): its own note at the right, so other messages never wipe it
         self.update_var = tk.StringVar(value="")
         self.update_url = ""
+        self.update_note: dict = {}
         self.update_label = ttk.Label(row, textvariable=self.update_var, style="StatusLink.TLabel", cursor="hand2")
         self.update_label.pack(side=tk.RIGHT, anchor="e", padx=(px(self, 10), 0))
-        self.update_label.bind("<Button-1>", lambda _e: self.open_release())
+        self.update_label.bind("<Button-1>", lambda _e: self.open_update())
         self.status_label = ttk.Label(row, textvariable=self.status_var, style="Status.TLabel", anchor="w")
         self.status_label.pack(side=tk.LEFT, anchor="w", fill=tk.X, expand=True)
         line = ttk.Label(status, text=cr.STATUS_LINE, style="Status.TLabel", foreground=style.SIDE_HINT)

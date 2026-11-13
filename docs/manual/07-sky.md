@@ -155,7 +155,7 @@ The system profile is named from the telescope name, focal length and camera. Th
 with a focal length within 3 % is the same profile: it keeps its name and its focal length. If another profile for
 this camera at this focal length has a different telescope name, a ⚠ in the window says so.
 
-Every night SHOBS-FLUX uses goes into the run history once, for the History page.
+Every night you save goes into the run history once, for the History page. A run you don't save is a look only: it is not in the history.
 
 > **Tip:** Run the Sky page now and then, after a few new nights, and save. The zero point and extinction then
 > follow your system through the seasons, and the History page shows it.

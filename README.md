@@ -1,13 +1,15 @@
 # SHOBS-FLUX
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.24115980.svg)](https://doi.org/10.5281/zenodo.24115980)
+
 **Shiloh Hill Observatory Optical System Characterization.** SHOBS-FLUX measures your camera and telescope (gain,
 read noise, full well, linearity, dark current, zero point, extinction, seeing) and keeps a dated history of them.
 It writes the shared instrument profiles that [SHOBS-P](https://github.com/SHOBS-S/SHOBS-P) and
 [SHOBS-SCHED](https://github.com/SHOBS-S/SHOBS-SCHED) read, so their noise models and exposure choices use your
 own system's numbers instead of guesses.
 
-> **Version 1.0.0**, the first release (9 November 2026). Built in milestones 0.1 to 0.6.1; every milestone's notes
-> are kept below. The user's manual comes with the release.
+> **Version 1.0.1** (13 November 2026), a small update to 1.0.0, the first release (9 November 2026). Built in
+> milestones 0.1 to 0.6.1; every milestone's notes are kept below. The user's manual comes with the release.
 
 ## What it does
 
@@ -75,6 +77,17 @@ own system's numbers instead of guesses.
   ones you know, the rest are assumed and the report says so), the zero point and seeing over time with a
   before / after split, and the methods and caveats. A **shared copy** leaves out the site (latitude, longitude,
   elevation) and the file locations on your computer.
+
+## New in 1.0.1
+
+- **What's new, at a glance** (GitHub #2). When a newer release is out, the status-strip note gives its first
+  highlight ("SHOBS-FLUX 1.0.2 is available: … — click for details"); a click opens a small **New version** window
+  with the release's highlights and an **Open release page** button. It still never downloads or installs anything.
+  The check is now the same shared code as in SHOBS-P and SHOBS-SCHED.
+- **Citing:** SHOBS-FLUX has its Zenodo concept DOI, [10.5281/zenodo.24115980](https://doi.org/10.5281/zenodo.24115980)
+  (all versions). The Credits page's *How to cite* line and `CITATION.cff` carry it.
+- **History page:** the hint now says it right: a telescope + camera's history holds the Sky nights you *save*, not
+  every Sky run.
 
 ## New in 1.0.0
 
@@ -205,7 +218,7 @@ own system's numbers instead of guesses.
 | When | What |
 | --- | --- |
 | SHOBS-P 2.4.0 | SHOBS-P reads the profiles (its linear limit from FLUX, GitHub SHOBS-P #58) |
-| After 1.0.0 | Multi-field Sky folders (mosaic panels); the concept DOI in Credits once Zenodo has made it |
+| Later | Multi-field Sky folders (mosaic panels) |
 
 ## Install (Windows)
 
@@ -232,7 +245,9 @@ The profile format (version 1) is defined in `shobs_profile.py`, one file copied
 
 ## How to cite
 
-See CITATION.cff (GitHub shows it as "Cite this repository"). The Credits and sources page gives the same line.
+Use SHOBS-FLUX's Zenodo DOI, [10.5281/zenodo.24115980](https://doi.org/10.5281/zenodo.24115980) (all versions; it
+resolves to the newest). See CITATION.cff (GitHub shows it as "Cite this repository"). The Credits and sources page
+gives the same line.
 
 ## License
 
