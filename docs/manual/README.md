@@ -49,4 +49,4 @@
     zero point, extinction, scintillation, and the other words this manual uses.
 
 ---
-*Screenshots taken from SHOBS-FLUX 1.0.0 on Windows.*
+*Screenshots taken from SHOBS-FLUX 1.0.0 on Windows; 01, 09 (History page) and 11 (Credits) retaken from 1.0.1. The others show* Version 1.0.0 *in the sidebar; nothing else on those pages changed.*
